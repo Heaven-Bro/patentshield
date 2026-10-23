@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from pydantic import BaseModel, Field
 
 
@@ -25,6 +27,10 @@ class EvidenceItem(BaseModel):
     exact_quote: str
     page_index: int | None = None
     section_type: str
+    # Needed for canonical-source quote verification; None is fail-closed.
+    chunk_id: str | None = None
+    retrieval_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    quote_verified: bool | None = None
 
 
 class LimitationAssessmentResult(BaseModel):
@@ -42,6 +48,9 @@ class LimitationAssessmentResult(BaseModel):
     explanation: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
+    retrieval_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+    technical_correspondence: float = Field(default=0.0, ge=0.0, le=1.0)
+    quote_verified: bool | None = None
 
 
 class AnalysisState(TypedDict):
@@ -61,3 +70,5 @@ class AnalysisState(TypedDict):
     assessments: list[dict]
     status: str
     error_message: str | None
+    # Optional keeps older initial-state payloads compatible with the graph.
+    metrics: NotRequired[dict[str, float]]

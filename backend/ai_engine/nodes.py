@@ -332,6 +332,146 @@ def limitation_evaluator_node(state: AnalysisState) -> dict[str, Any]:
     }
 
 
+
+def groundedness_guardrail_node(state: AnalysisState) -> dict[str, Any]:
+    """Verify cited quotes against canonical tenant-owned TextChunk rows."""
+    tenant_id = state.get("tenant_id", "")
+    if not tenant_id:
+        message = (
+            "Groundedness verification skipped because tenant context is missing."
+        )
+        old_message = str(state.get("error_message") or "").strip()
+        return {
+            "assessments": _fail_closed_assessments(
+                state.get("assessments", []),
+                message=(
+                    "Fail-Closed: Cited quote could not be verified against "
+                    "source document text."
+                ),
+            ),
+            "error_message": _append_messages(old_message, message),
+            "status": "COMPLETED_WITH_WARNINGS",
+        }
+
+    try:
+        from ai_engine.guardrails import GroundednessGuardrail
+
+        assessments, warnings = GroundednessGuardrail.verify_assessments(
+            state.get("assessments", []), tenant_id=tenant_id
+        )
+    except Exception as exc:
+        # Guardrails must never convert an internal failure into a pass.
+        logger.error(
+            "Groundedness guardrail failed for analysis_id=%s error_type=%s.",
+            state.get("analysis_id", "unknown"),
+            type(exc).__name__,
+        )
+        warning = (
+            "Fail-Closed: Cited quote could not be verified against source "
+            "document text."
+        )
+        assessments = _fail_closed_assessments(
+            state.get("assessments", []), message=warning
+        )
+        warnings = [warning]
+
+    old_message = str(state.get("error_message") or "").strip()
+    error_message = _append_messages(old_message, *warnings)
+    result: dict[str, Any] = {"assessments": assessments}
+    if warnings:
+        result["error_message"] = error_message
+        if state.get("status") != "FAILED":
+            result["status"] = "COMPLETED_WITH_WARNINGS"
+    return result
+
+
+def scoring_node(state: AnalysisState) -> dict[str, Any]:
+    """Calculate and attach review-queue screening metrics to graph state."""
+    from ai_engine.scoring import MultiMetricScorer
+
+    try:
+        metrics = MultiMetricScorer.calculate_screening_priority(
+            state.get("assessments", [])
+        )
+        return {"metrics": metrics}
+    except Exception as exc:
+        logger.error(
+            "Screening scoring failed for analysis_id=%s error_type=%s.",
+            state.get("analysis_id", "unknown"),
+            type(exc).__name__,
+        )
+        message = (
+            "Screening metrics could not be calculated. Check the application logs."
+        )
+        return {
+            "metrics": {
+                "retrieval_relevance": 0.0,
+                "limitation_coverage": 0.0,
+                "evidence_confidence": 0.0,
+                "technical_correspondence": 0.0,
+                "screening_priority_score": 0.0,
+            },
+            "error_message": _append_messages(
+                str(state.get("error_message") or "").strip(), message
+            ),
+        }
+
+
+def _fail_closed_assessments(
+    assessments: list[dict[str, Any]],
+    *,
+    message: str,
+) -> list[dict[str, Any]]:
+    """Mark cited evidence unverified if guardrail initialization itself fails."""
+    failed: list[dict[str, Any]] = []
+    for original in assessments:
+        assessment = dict(original)
+        evidence_items = assessment.get("evidence", [])
+        if isinstance(evidence_items, list):
+            assessment["evidence"] = [
+                {**item, "quote_verified": False}
+                if isinstance(item, dict)
+                else item
+                for item in evidence_items
+            ]
+            if evidence_items:
+                assessment["status"] = "UNCERTAIN"
+                assessment["confidence"] = 0.0
+                explanation = str(assessment.get("explanation", "")).strip()
+                if message not in explanation:
+                    assessment["explanation"] = f"{explanation}\n\n{message}".strip()
+                assessment["quote_verified"] = False
+        failed.append(assessment)
+    return failed
+
+
+def _append_messages(existing: str, *messages: str) -> str | None:
+    """Append unique non-empty operational messages without replacing prior errors."""
+    parts = [part.strip() for part in existing.splitlines() if part.strip()]
+    for message in messages:
+        cleaned = str(message).strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return "\n".join(parts) or None
+
+
+def _candidate_relevance(candidate: dict[str, Any], fallback: float) -> float:
+    """Choose a normalized rerank/dense signal, avoiding raw BM25 scores."""
+    for key in ("rerank_score", "dense_score"):
+        try:
+            score = float(candidate.get(key, 0.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(score) and score > 0.0:
+            return min(1.0, max(0.0, score))
+
+    try:
+        score = float(fallback)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return min(1.0, max(0.0, score)) if math.isfinite(score) else 0.0
+
+
 def _split_claim_into_limitations(claim_text: str) -> list[str]:
     """Return conservative, ordered limitations from a claim string."""
     without_number = _LEADING_CLAIM_NUMBER_RE.sub("", claim_text, count=1).strip()
@@ -498,6 +638,8 @@ def _assess_limitation(
                     exact_quote=quote,
                     page_index=_optional_int(page_index),
                     section_type=str(candidate.get("section_type", "UNKNOWN")),
+                    chunk_id=str(candidate.get("chunk_id", "")) or None,
+                    retrieval_score=_candidate_relevance(candidate, best_score),
                 )
             )
 
@@ -507,6 +649,8 @@ def _assess_limitation(
         explanation=explanation,
         evidence=evidence_items,
         confidence=min(1.0, max(0.0, confidence)),
+        retrieval_relevance=_candidate_relevance(best_candidate, best_score),
+        technical_correspondence=best_coverage,
     )
 
 
