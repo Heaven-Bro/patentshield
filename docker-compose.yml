@@ -41,6 +41,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    working_dir: /app/backend
     env_file:
       - .env
     environment:

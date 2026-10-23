@@ -129,7 +129,7 @@ class PatentDocumentUploadView(TenantPatentAPIView):
                 )
                 AuditLog.objects.create(
                     tenant=tenant,
-                    actor_user=request.user,
+                    actor_user_id =request.user.pk,
                     action="UPLOAD_PATENT_DOCUMENT",
                     resource_type="PatentDocumentVersion",
                     resource_id=version.pk,

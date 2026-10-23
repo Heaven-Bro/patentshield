@@ -144,7 +144,7 @@ class ClaimAssessment(TenantScopedModel):
                 name="analysis_claim_limitation_uniq",
             ),
             models.CheckConstraint(
-                check=(
+                condition=(
                     Q(confidence__isnull=True)
                     | (Q(confidence__gte=0.0) & Q(confidence__lte=1.0))
                 ),
