@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "audit",
     "patents",
     "indexing",
+    "ingestion",
     "retrieval",
     "ai_engine",
     "analyses",
