@@ -1,28 +1,26 @@
-"""
-ASGI config for config project.
+"""ASGI entry point for HTTP and authenticated WebSocket traffic."""
 
-It exposes the ASGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
-"""
+from __future__ import annotations
 
 import os
+
 from django.core.asgi import get_asgi_application
-from channels.routing import ProtocolTypeRouter, URLRouter
-from channels.auth import AuthMiddlewareStack
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
-django_asgi_app = get_asgi_application()
+django_asgi_application = get_asgi_application()
+
+from channels.auth import AuthMiddlewareStack  # noqa: E402
+from channels.routing import ProtocolTypeRouter, URLRouter  # noqa: E402
+from channels.security.websocket import AllowedHostsOriginValidator  # noqa: E402
+
+from analyses.routing import websocket_urlpatterns  # noqa: E402
 
 application = ProtocolTypeRouter(
     {
-        "http": django_asgi_app,
-        # "websocket": AuthMiddlewareStack(
-        #     URLRouter(
-        #         # analyses.routing.websocket_urlpatterns
-        #     )
-        # ),
+        "http": django_asgi_application,
+        "websocket": AllowedHostsOriginValidator(
+            AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
+        ),
     }
 )
