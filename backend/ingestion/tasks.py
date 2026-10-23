@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import io
 import logging
-import uuid
 
 from celery import Task, shared_task
 from django.core.files.storage import default_storage
@@ -14,7 +13,7 @@ from django.db import transaction
 
 from audit.models import AuditLog
 from ingestion.parsers import ClaimDeconstructionParser
-from patents.models import Claim, PatentDocumentVersion
+from patents.models import Claim, Patent, PatentDocumentVersion
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +78,6 @@ def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
     )
 
 
-def _as_uuid(value: object) -> uuid.UUID | None:
-    """Return a UUID for UUID-compatible user IDs, otherwise ``None``."""
-    if value is None:
-        return None
-    try:
-        return uuid.UUID(str(value))
-    except (AttributeError, TypeError, ValueError):
-        # The audit field is UUID-based; Django default user IDs are integers.
-        return None
-
-
 def _record_extraction_failure(
     document_version: PatentDocumentVersion,
     task: Task,
@@ -103,6 +91,10 @@ def _record_extraction_failure(
         ).update(
             extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED
         )
+        Patent.objects.filter(
+            pk=document_version.patent_id,
+            tenant_id=document_version.tenant_id,
+        ).update(status=Patent.Status.FAILED)
     except Exception:
         logger.exception(
             "Could not mark patent document version %s as failed.",
@@ -112,7 +104,7 @@ def _record_extraction_failure(
     try:
         AuditLog.objects.create(
             tenant_id=document_version.tenant_id,
-            actor_user_id=_as_uuid(document_version.patent.created_by_id),
+            actor_user=document_version.patent.created_by,
             action="PROCESS_PATENT_DOCUMENT_VERSION",
             resource_type="PatentDocumentVersion",
             resource_id=document_version.pk,
@@ -149,6 +141,10 @@ def process_patent_document_version(
             PatentDocumentVersion.ExtractionStatus.EXTRACTING
         )
         document_version.save(update_fields=("extraction_status",))
+        Patent.objects.filter(
+            pk=document_version.patent_id,
+            tenant_id=document_version.tenant_id,
+        ).update(status=Patent.Status.PROCESSING)
 
         if document_version.patent.tenant_id != document_version.tenant_id:
             raise ValueError(
@@ -206,6 +202,23 @@ def process_patent_document_version(
                 page_count=page_count,
             )
 
+        # Extraction is the first stage of the document pipeline. Dispatch text
+        # embeddings and schematic crops only after claims/status are committed.
+        # Both downstream tasks are idempotent and can safely be retried.
+        from indexing.tasks import (
+            extract_and_index_schematics,
+            generate_document_embeddings,
+        )
+
+        generate_document_embeddings.apply_async(
+            args=[str(document_version.pk)],
+            queue="embedding",
+        )
+        extract_and_index_schematics.apply_async(
+            args=[str(document_version.pk)],
+            queue="ingestion",
+        )
+
         logger.info(
             "Extracted patent document version %s: %d page(s), %d claim(s).",
             document_version.pk,
@@ -219,6 +232,7 @@ def process_patent_document_version(
             ),
             "page_count": page_count,
             "claims_created": len(claim_records),
+            "indexing_tasks_dispatched": 2,
         }
 
     except Exception as exc:

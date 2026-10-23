@@ -19,7 +19,7 @@ from django.db import transaction
 from audit.models import AuditLog
 from indexing.models import TextChunk
 from indexing.services import BGEEmbedder, HybridChunker
-from patents.models import Claim, PatentDocumentVersion, Schematic
+from patents.models import Claim, Patent, PatentDocumentVersion, Schematic
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +61,6 @@ class _FigureCandidate:
     source: str
 
 
-def _uuid_or_none(value: object) -> uuid.UUID | None:
-    """Convert UUID-compatible values for the UUID audit actor field."""
-    if value is None:
-        return None
-    try:
-        return uuid.UUID(str(value))
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
 def _record_task_failure(
     document_version: PatentDocumentVersion,
     task: Task,
@@ -81,9 +71,7 @@ def _record_task_failure(
     try:
         AuditLog.objects.create(
             tenant_id=document_version.tenant_id,
-            actor_user_id=_uuid_or_none(
-                document_version.patent.created_by_id
-            ),
+            actor_user=document_version.patent.created_by,
             action=action,
             resource_type="PatentDocumentVersion",
             resource_id=document_version.pk,
@@ -343,6 +331,10 @@ def generate_document_embeddings(
                 patent_id=document_version.patent_id,
             ).delete()
             TextChunk.objects.bulk_create(records, batch_size=256)
+            Patent.objects.filter(
+                pk=document_version.patent_id,
+                tenant_id=document_version.tenant_id,
+            ).update(status=Patent.Status.INDEXED)
 
         logger.info(
             "Indexed document version %s with %d text chunks.",
@@ -361,6 +353,10 @@ def generate_document_embeddings(
             document_version_id,
         )
         if document_version is not None:
+            Patent.objects.filter(
+                pk=document_version.patent_id,
+                tenant_id=document_version.tenant_id,
+            ).update(status=Patent.Status.FAILED)
             _record_task_failure(
                 document_version,
                 self,
