@@ -164,7 +164,7 @@ class AnalysisListCreateView(APIView):
             )
             AuditLog.objects.create(
                 tenant_id=tenant.pk,
-                actor_user_id=request.user.id,
+                actor_user=request.user,
                 action="CREATE_PATENT_ANALYSIS",
                 resource_type="AnalysisReport",
                 resource_id=analysis.pk,
@@ -207,7 +207,7 @@ class AnalysisListCreateView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user_id=request.user.id,
+                    actor_user=request.user,
                     action="QUEUE_PATENT_ANALYSIS",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -292,7 +292,7 @@ class AnalysisRetryView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user_id=request.user.id,
+                    actor_user=request.user,
                     action="RETRY_PATENT_ANALYSIS",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -327,7 +327,7 @@ class AnalysisRetryView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user_id=request.user.id,
+                    actor_user=request.user,
                     action="QUEUE_PATENT_ANALYSIS_RETRY",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -455,7 +455,7 @@ class AnalysisReviewView(APIView):
 
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user_id=request.user.id,
+                    actor_user=request.user,
                     action="REVIEW_CLAIM_ASSESSMENT",
                     resource_type="ClaimAssessment",
                     resource_id=assessment.pk,
@@ -645,6 +645,24 @@ class AnalysisDetailView(APIView):
                     "created_at": analysis.created_at.isoformat(),
                     "completed_at": analysis.completed_at.isoformat()
                     if analysis.completed_at else None,
+                    "report_export_status": analysis.report_export_status,
+                    "report_export_error_code": analysis.report_export_error_code,
+                    "report_generated_at": (
+                        analysis.report_generated_at.isoformat()
+                        if analysis.report_generated_at else None
+                    ),
+                    "report_available": {
+                        "pdf": (
+                            analysis.report_export_status
+                            == AnalysisReport.ReportExportStatus.COMPLETED
+                            and bool(analysis.report_storage_key)
+                        ),
+                        "json": (
+                            analysis.report_export_status
+                            == AnalysisReport.ReportExportStatus.COMPLETED
+                            and bool(analysis.report_json_storage_key)
+                        ),
+                    },
                 },
                 "selectedClaim": {
                     "id": str(claim.pk) if claim else None,
@@ -687,6 +705,24 @@ def _serialize_analysis(analysis: AnalysisReport) -> dict[str, Any]:
             analysis.completed_at.isoformat() if analysis.completed_at else None
         ),
         "error_code": analysis.error_code,
+        "report_export_status": analysis.report_export_status,
+        "report_export_error_code": analysis.report_export_error_code,
+        "report_generated_at": (
+            analysis.report_generated_at.isoformat()
+            if analysis.report_generated_at else None
+        ),
+        "report_available": {
+            "pdf": (
+                analysis.report_export_status
+                == AnalysisReport.ReportExportStatus.COMPLETED
+                and bool(analysis.report_storage_key)
+            ),
+            "json": (
+                analysis.report_export_status
+                == AnalysisReport.ReportExportStatus.COMPLETED
+                and bool(analysis.report_json_storage_key)
+            ),
+        },
     }
 
 

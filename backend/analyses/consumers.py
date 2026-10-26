@@ -110,6 +110,24 @@ class AnalysisProgressConsumer(AsyncJsonWebsocketConsumer):
             }
         )
 
+    async def report_progress(self, event: dict[str, Any]) -> None:
+        """Forward asynchronous JSON/PDF export progress to the client."""
+        await self.send_json(
+            {
+                "type": "report.progress",
+                "data": event.get("data", {}),
+            }
+        )
+
+    async def report_completed(self, event: dict[str, Any]) -> None:
+        """Forward terminal export state without closing the analysis socket."""
+        await self.send_json(
+            {
+                "type": "report.completed",
+                "data": event.get("data", {}),
+            }
+        )
+
     @database_sync_to_async
     def _resolve_authorized_tenant(
         self,

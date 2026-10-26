@@ -21,11 +21,19 @@ class AnalysisReport(TenantScopedModel):
     class Status(models.TextChoices):
         QUEUED = "QUEUED", "Queued"
         RUNNING = "RUNNING", "Running"
+        # Legacy state retained for compatibility with existing databases.
         EXPORTING = "EXPORTING", "Exporting report"
         COMPLETED = "COMPLETED", "Completed"
         COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS", "Completed with warnings"
         FAILED = "FAILED", "Failed"
         CANCELLED = "CANCELLED", "Cancelled"
+
+    class ReportExportStatus(models.TextChoices):
+        NOT_REQUESTED = "NOT_REQUESTED", "Not requested"
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Running"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
 
     id = models.UUIDField(
         primary_key=True,
@@ -62,6 +70,15 @@ class AnalysisReport(TenantScopedModel):
     result_summary = models.JSONField(null=True, blank=True)
     report_storage_key = models.TextField(blank=True, null=True)
     report_json_storage_key = models.TextField(blank=True, null=True)
+    report_export_status = models.CharField(
+        max_length=13,
+        choices=ReportExportStatus.choices,
+        default=ReportExportStatus.NOT_REQUESTED,
+        db_index=True,
+    )
+    report_export_error_code = models.CharField(max_length=100, blank=True, null=True)
+    report_export_task_id = models.CharField(max_length=100, blank=True, null=True)
+    report_generated_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=100, blank=True, null=True)
     execution_task_id = models.CharField(max_length=100, blank=True, null=True)
     created_by = models.ForeignKey(
