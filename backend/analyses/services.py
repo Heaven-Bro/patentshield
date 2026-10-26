@@ -38,13 +38,13 @@ def persist_analysis_result(
     """
     with transaction.atomic():
         analysis = (
-            AnalysisReport.objects.select_for_update()
-            .select_related(
+            AnalysisReport.objects.select_related(
                 "patent",
                 "target_document_version",
                 "target_claim",
                 "created_by",
             )
+            .select_for_update(of=("self",))
             .get(pk=analysis_id)
         )
         tenant_id = analysis.tenant_id
@@ -294,7 +294,7 @@ def persist_analysis_result(
 
         AuditLog.objects.create(
             tenant_id=tenant_id,
-            actor_user=analysis.created_by,
+            actor_user_id=analysis.created_by_id,
             action=(
                 "PATENT_ANALYSIS_FAILED"
                 if final_status == AnalysisReport.Status.FAILED

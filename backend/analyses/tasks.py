@@ -261,7 +261,7 @@ def _claim_analysis_for_execution(
         )
         AuditLog.objects.create(
             tenant_id=report.tenant_id,
-            actor_user=report.created_by,
+            actor_user_id=report.created_by_id,
             action="PATENT_ANALYSIS_STARTED",
             resource_type="AnalysisReport",
             resource_id=report.pk,
@@ -330,7 +330,7 @@ def _mark_analysis_retry_scheduled(
             )
             AuditLog.objects.create(
                 tenant_id=locked.tenant_id,
-                actor_user=locked.created_by,
+                actor_user_id=locked.created_by_id,
                 action="PATENT_ANALYSIS_RETRY_SCHEDULED",
                 resource_type="AnalysisReport",
                 resource_id=locked.pk,
@@ -374,7 +374,7 @@ def _mark_analysis_failed(
             )
             AuditLog.objects.create(
                 tenant_id=locked.tenant_id,
-                actor_user=locked.created_by,
+                actor_user_id=locked.created_by_id,
                 action="PATENT_ANALYSIS_FAILED",
                 resource_type="AnalysisReport",
                 resource_id=locked.pk,

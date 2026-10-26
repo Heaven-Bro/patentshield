@@ -13,7 +13,11 @@ from analyses.tasks import run_patent_analysis
 from indexing.models import TextChunk
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import Tenant, TenantMembership
+import sys
+from unittest.mock import MagicMock
 
+if "ai_engine.graph" not in sys.modules:
+    sys.modules["ai_engine.graph"] = MagicMock()
 
 class AnalysisLifecycleAPITests(TestCase):
     """Exercise tenant-scoped creation and background dispatch contracts."""

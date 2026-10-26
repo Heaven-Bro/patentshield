@@ -71,7 +71,7 @@ def _record_task_failure(
     try:
         AuditLog.objects.create(
             tenant_id=document_version.tenant_id,
-            actor_user=document_version.patent.created_by,
+            actor_user_id=document_version.patent.created_by_id,
             action=action,
             resource_type="PatentDocumentVersion",
             resource_id=document_version.pk,

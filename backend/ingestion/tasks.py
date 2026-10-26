@@ -104,7 +104,7 @@ def _record_extraction_failure(
     try:
         AuditLog.objects.create(
             tenant_id=document_version.tenant_id,
-            actor_user=document_version.patent.created_by,
+            actor_user_id=document_version.patent.created_by_id,
             action="PROCESS_PATENT_DOCUMENT_VERSION",
             resource_type="PatentDocumentVersion",
             resource_id=document_version.pk,
