@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import threading
 import time
 import tracemalloc
 import uuid
@@ -23,8 +24,13 @@ from django.test import override_settings
 
 from indexing.models import TextChunk
 from indexing.services import BGEEmbedder
-from patents.models import Patent, PatentDocumentVersion
+from patents.models import Patent, PatentDocumentVersion, Schematic
 from tenants.models import Tenant, TenantMembership
+
+try:
+    import psutil
+except ImportError:  # RSS measurement is optional for minimal runtime images.
+    psutil = None  # type: ignore[assignment]
 
 
 VECTOR = [1.0] + [0.0] * (BGEEmbedder.DIMENSIONS - 1)
@@ -125,6 +131,54 @@ def _fake_embedding_model(
     return [VECTOR.copy() for _text in texts]
 
 
+class _PeakRSSSampler:
+    """Sample process RSS while a benchmark runs, when psutil is installed."""
+
+    def __init__(self, interval_seconds: float = 0.01) -> None:
+        self._process = psutil.Process(os.getpid()) if psutil is not None else None
+        self._interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.baseline_bytes = self._read_rss()
+        self.peak_bytes = self.baseline_bytes
+
+    @property
+    def available(self) -> bool:
+        return self._process is not None
+
+    def _read_rss(self) -> int:
+        if self._process is None:
+            return 0
+        try:
+            return int(self._process.memory_info().rss)
+        except Exception:
+            return self.peak_bytes if hasattr(self, "peak_bytes") else 0
+
+    def _sample(self) -> None:
+        self.peak_bytes = max(self.peak_bytes, self._read_rss())
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            self._sample()
+
+    def start(self) -> None:
+        if not self.available:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="patentshield-rss-sampler",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> float:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._sample()
+        return max(0, self.peak_bytes - self.baseline_bytes) / (1024 * 1024)
+
+
 def _mock_reranker(
     _cls: type[Any],
     query: str,
@@ -138,6 +192,7 @@ def _mock_reranker(
     return candidates[:top_n]
 
 
+@pytest.mark.performance
 @pytest.mark.django_db
 @pytest.mark.skipif(
     connection.vendor != "postgresql",
@@ -240,11 +295,19 @@ def _build_multi_page_pdf(page_count: int = 12) -> bytes:
                 675,
                 "2. The computing system of claim 1, further comprising a sensor.",
             )
+        if page_index == page_count // 2:
+            # A deterministic vector drawing larger than the extractor's region
+            # threshold, so the schematic task exercises real PDF geometry.
+            canvas.setLineWidth(2)
+            canvas.rect(150, 390, 220, 180, stroke=1, fill=0)
+            canvas.line(150, 390, 370, 570)
+            canvas.line(150, 570, 370, 390)
         canvas.showPage()
     canvas.save()
     return output.getvalue()
 
 
+@pytest.mark.performance
 @pytest.mark.django_db
 @pytest.mark.skipif(
     connection.vendor != "postgresql",
@@ -279,12 +342,28 @@ def test_pdf_ingestion_throughput_sla(
     )
 
     class InMemoryPatentStorage:
-        """Minimal storage adapter returning the generated PDF bytes."""
+        """Small deterministic storage adapter for PDF and extracted PNG files."""
+
+        def __init__(self) -> None:
+            self.files: dict[str, bytes] = {version.storage_key: pdf_bytes}
 
         def open(self, name: str, mode: str = "rb") -> io.BytesIO:
-            assert name == version.storage_key
             assert mode == "rb"
-            return io.BytesIO(pdf_bytes)
+            try:
+                return io.BytesIO(self.files[name])
+            except KeyError as exc:
+                raise FileNotFoundError(name) from exc
+
+        def save(self, name: str, content: Any) -> str:
+            content.seek(0)
+            self.files[name] = content.read()
+            return name
+
+        def exists(self, name: str) -> bool:
+            return name in self.files
+
+        def delete(self, name: str) -> None:
+            self.files.pop(name, None)
 
     storage = InMemoryPatentStorage()
     monkeypatch.setattr(ingestion_tasks, "default_storage", storage)
@@ -294,6 +373,19 @@ def test_pdf_ingestion_throughput_sla(
         "embed_texts",
         classmethod(_fake_embedding_model),
     )
+    # The extraction task normally enqueues both downstream jobs. Suppress the
+    # broker dispatch here, then execute each stage exactly once in-process so
+    # the benchmark remains deterministic and cannot race a live worker.
+    monkeypatch.setattr(
+        ingestion_tasks.generate_document_embeddings,
+        "apply_async",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        ingestion_tasks.extract_and_index_schematics,
+        "apply_async",
+        lambda *args, **kwargs: None,
+    )
 
     sla_seconds = _env_positive_float("PATENTSHIELD_PDF_INGESTION_SLA_SECONDS", 10.0)
     memory_limit_mb = _env_positive_float(
@@ -301,6 +393,8 @@ def test_pdf_ingestion_throughput_sla(
         256.0,
     )
 
+    rss_sampler = _PeakRSSSampler()
+    rss_sampler.start()
     tracemalloc.start()
     started_at = time.perf_counter()
     try:
@@ -310,10 +404,14 @@ def test_pdf_ingestion_throughput_sla(
         embedding_result = indexing_tasks.generate_document_embeddings.run(
             str(version.pk)
         )
+        schematic_result = indexing_tasks.extract_and_index_schematics.run(
+            str(version.pk)
+        )
         elapsed_seconds = time.perf_counter() - started_at
         _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
+        rss_delta_mb = rss_sampler.stop()
 
     version.refresh_from_db()
     assert extraction_result["page_count"] == 12
@@ -324,6 +422,19 @@ def test_pdf_ingestion_throughput_sla(
         document_version=version,
         embedding__isnull=False,
     ).exists()
+    assert schematic_result["document_version_id"] == str(version.pk)
+    assert schematic_result["schematics_created"] >= 1
+    schematics = Schematic.objects.for_tenant(tenant.pk).filter(
+        document_version=version
+    )
+    assert schematics.exists()
+    for schematic in schematics:
+        assert schematic.bbox is not None
+        assert all(
+            0.0 <= float(schematic.bbox[key]) <= 1.0
+            for key in ("x", "y", "width", "height")
+        )
+        assert storage.exists(schematic.image_storage_key)
 
     peak_memory_mb = peak_bytes / (1024 * 1024)
     assert elapsed_seconds < sla_seconds, (
@@ -331,6 +442,11 @@ def test_pdf_ingestion_throughput_sla(
         f"{elapsed_seconds:.3f}s >= {sla_seconds:.3f}s."
     )
     assert peak_memory_mb < memory_limit_mb, (
-        "PDF ingestion exceeded its Python allocation budget: "
+        "PDF processing exceeded its Python allocation budget: "
         f"{peak_memory_mb:.1f} MiB >= {memory_limit_mb:.1f} MiB."
     )
+    if rss_sampler.available:
+        assert rss_delta_mb < memory_limit_mb, (
+            "PDF processing exceeded its process RSS growth budget: "
+            f"{rss_delta_mb:.1f} MiB >= {memory_limit_mb:.1f} MiB."
+        )

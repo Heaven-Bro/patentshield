@@ -322,6 +322,14 @@ def _mark_analysis_retry_scheduled(
             locked = AnalysisReport.objects.select_for_update().get(pk=report.pk)
             if locked.status in _TERMINAL_STATUSES:
                 return
+            task_id = getattr(task.request, "id", None)
+            if locked.execution_task_id != task_id:
+                logger.warning(
+                    "Ignoring stale retry update for analysis_id=%s task_id=%s.",
+                    locked.pk,
+                    task_id,
+                )
+                return
             locked.status = AnalysisReport.Status.QUEUED
             locked.error_code = "RETRY_SCHEDULED"
             locked.completed_at = None
@@ -362,9 +370,17 @@ def _mark_analysis_failed(
     try:
         with transaction.atomic():
             locked = AnalysisReport.objects.select_for_update().get(pk=report.pk)
-            # A task that failed after another execution completed must not
-            # overwrite the successful terminal result.
+            # A stale task must not overwrite a successful terminal result or
+            # a newer worker's active execution.
             if locked.status in _TERMINAL_STATUSES:
+                return
+            task_id = getattr(task.request, "id", None)
+            if locked.execution_task_id != task_id:
+                logger.warning(
+                    "Ignoring stale failure update for analysis_id=%s task_id=%s.",
+                    locked.pk,
+                    task_id,
+                )
                 return
             locked.status = AnalysisReport.Status.FAILED
             locked.error_code = type(error).__name__[:100]
