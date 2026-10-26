@@ -23,6 +23,7 @@ class AnalysisReport(TenantScopedModel):
         RUNNING = "RUNNING", "Running"
         EXPORTING = "EXPORTING", "Exporting report"
         COMPLETED = "COMPLETED", "Completed"
+        COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS", "Completed with warnings"
         FAILED = "FAILED", "Failed"
         CANCELLED = "CANCELLED", "Cancelled"
 
@@ -41,9 +42,16 @@ class AnalysisReport(TenantScopedModel):
         on_delete=models.PROTECT,
         related_name="analyses",
     )
+    target_claim = models.ForeignKey(
+        "patents.Claim",
+        on_delete=models.PROTECT,
+        related_name="target_analyses",
+        null=True,
+        blank=True,
+    )
     analysis_type = models.CharField(max_length=40, default="PRIOR_ART_OVERLAP")
     status = models.CharField(
-        max_length=12,
+        max_length=24,
         choices=Status.choices,
         default=Status.QUEUED,
         db_index=True,
@@ -55,6 +63,7 @@ class AnalysisReport(TenantScopedModel):
     report_storage_key = models.TextField(blank=True, null=True)
     report_json_storage_key = models.TextField(blank=True, null=True)
     error_code = models.CharField(max_length=100, blank=True, null=True)
+    execution_task_id = models.CharField(max_length=100, blank=True, null=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
