@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
+from corsheaders.defaults import default_headers
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = BASE_DIR.parent
@@ -97,10 +98,9 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.postgres",
     "rest_framework",
+    "accounts.apps.AccountsConfig",
     "pgvector",
     "corsheaders",
-
-    "accounts",
     "channels",
     "tenants",
     "audit",
@@ -193,6 +193,16 @@ CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = _env_csv(
     "CSRF_TRUSTED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
+)
+
+# Browser sessions are cookie-based; unsafe requests additionally require the
+# CSRF token returned by /api/v1/auth/csrf/. Do not store session IDs in JS.
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+SESSION_EXPIRE_AT_BROWSER_CLOSE = _env_bool(
+    "SESSION_EXPIRE_AT_BROWSER_CLOSE", False
 )
 
 REST_FRAMEWORK = {

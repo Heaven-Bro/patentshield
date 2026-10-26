@@ -1,30 +1,21 @@
-"""
-URL configuration for config project.
+"""HTTP URL configuration for the PatentShield API."""
 
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
+from __future__ import annotations
+
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    # path("api/v1/tenants/", include("tenants.urls")),
-    # path("api/v1/audit/", include("audit.urls")),
+    path("api/v1/auth/", include("accounts.urls")),
+    path("api/v1/tenants/", include("tenants.urls")),
     path("api/v1/patents/", include("patents.urls")),
-    # path("api/v1/indexing/", include("indexing.urls")),
-    # path("api/v1/retrieval/", include("retrieval.urls")),
-    # path("api/v1/ai/", include("ai_engine.urls")),
-    # path("api/v1/analyses/", include("analyses.urls")),
-    # path("api/v1/reports/", include("reports.urls")),
+    # analyses.urls declares paths prefixed with "analyses/" internally.
+    path("api/v1/", include("analyses.urls")),
+    path("api/v1/reports/", include("reports.urls")),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
