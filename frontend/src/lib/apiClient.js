@@ -134,6 +134,64 @@ export async function apiRequest(path, options = {}) {
   return payload;
 }
 
+/**
+ * Download a tenant-authorized binary artifact using the session cookie and
+ * explicit tenant selector. Direct anchor URLs cannot attach X-Tenant-ID.
+ * @param {string} path
+ * @param {{tenantId?: string | null, fallbackFilename?: string}} [options]
+ * @returns {Promise<void>}
+ */
+export async function downloadArtifact(path, options = {}) {
+  const headers = { Accept: "application/pdf, application/json" };
+  if (options.tenantId) headers["X-Tenant-ID"] = options.tenantId;
+
+  const response = await fetch(apiUrl(path), {
+    method: "GET",
+    credentials: "include",
+    headers,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    let payload = null;
+    if ((response.headers.get("content-type") || "").includes("application/json")) {
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+    }
+    throw new ApiError(
+      extractErrorMessage(payload, response.status),
+      response.status,
+      payload,
+    );
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  let filename = options.fallbackFilename || "patentshield-report";
+  try {
+    filename = encodedFilename
+      ? decodeURIComponent(encodedFilename)
+      : plainFilename || filename;
+  } catch {
+    filename = plainFilename || filename;
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = "noopener noreferrer";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
 /** @param {Response} response */
 async function parseResponse(response) {
   if (response.status === 204) return null;

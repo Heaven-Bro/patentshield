@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import AnalysisConsole from "./components/AnalysisConsole";
 import LoginPage from "./components/LoginPage";
 import PatentsDashboard from "./components/PatentsDashboard";
 import TenantSwitcher from "./components/TenantSwitcher";
@@ -250,14 +251,22 @@ export default function App() {
           </div>
         </main>
       ) : (
-        <PatentsDashboard
-          tenant={activeTenant}
-          patents={patents}
-          loading={patentsLoading}
-          error={patentsError}
-          onRetry={() => setRefreshCounter((value) => value + 1)}
-          onRefresh={() => setRefreshCounter((value) => value + 1)}
-        />
+        <>
+          <PatentsDashboard
+            tenant={activeTenant}
+            patents={patents}
+            loading={patentsLoading}
+            error={patentsError}
+            onRetry={() => setRefreshCounter((value) => value + 1)}
+            onRefresh={() => setRefreshCounter((value) => value + 1)}
+          />
+          <AnalysisConsole
+            key={activeTenant.id}
+            tenant={activeTenant}
+            patents={patents}
+            onRefreshPatents={() => setRefreshCounter((value) => value + 1)}
+          />
+        </>
       )}
     </div>
   );
