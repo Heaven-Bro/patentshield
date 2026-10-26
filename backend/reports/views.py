@@ -159,11 +159,15 @@ class ReportGenerateView(ReportAPIView):
             )
 
         try:
-            generate_analysis_report.apply_async(
+            task = generate_analysis_report.apply_async(
                 args=[str(report.pk)],
-                task_id=task_id,
                 queue="exports",
             )
+            if task and getattr(task, "id", None):
+                task_id = str(task.id)
+                AnalysisReport.objects.for_tenant(tenant_id).filter(
+                    pk=report.pk
+                ).update(report_export_task_id=task_id)
         except Exception as exc:
             logger.error(
                 "Report export dispatch failed for analysis_id=%s error_type=%s.",

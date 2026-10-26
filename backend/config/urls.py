@@ -14,7 +14,7 @@ urlpatterns = [
     path("api/v1/patents/", include("patents.urls")),
     # analyses.urls declares paths prefixed with "analyses/" internally.
     path("api/v1/", include("analyses.urls")),
-    # path("api/v1/reports/", include("reports.urls")),
+    path("api/v1/reports/", include("reports.urls")),
 ]
 
 if settings.DEBUG:
