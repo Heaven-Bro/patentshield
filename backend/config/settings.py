@@ -99,6 +99,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "pgvector",
     "corsheaders",
+
+    "accounts",
     "channels",
     "tenants",
     "audit",
