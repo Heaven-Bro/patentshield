@@ -1,0 +1,163 @@
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000")
+  .replace(/\/+$/, "");
+
+let csrfToken = "";
+let csrfRequest = null;
+
+/**
+ * A typed-in-JSDoc HTTP error that preserves status and safe API error text.
+ */
+export class ApiError extends Error {
+  /**
+   * @param {string} message
+   * @param {number} status
+   * @param {unknown} payload
+   */
+  constructor(message, status, payload = null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+/**
+ * Bootstrap a CSRF token. A single in-flight request is shared by concurrent
+ * callers so React StrictMode does not issue duplicate bootstrap requests.
+ * @param {{force?: boolean}} [options]
+ * @returns {Promise<string>}
+ */
+export async function bootstrapCsrfToken({ force = false } = {}) {
+  if (!force && csrfToken) return csrfToken;
+  if (!force && csrfRequest) return csrfRequest;
+
+  csrfRequest = (async () => {
+    const response = await fetch(`${API_BASE_URL}/api/v1/auth/csrf/`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    const payload = await parseResponse(response);
+    if (!response.ok || typeof payload?.csrfToken !== "string") {
+      throw new ApiError(
+        "Could not initialize browser security. Check the backend and CORS settings.",
+        response.status,
+        payload,
+      );
+    }
+    csrfToken = payload.csrfToken;
+    return csrfToken;
+  })();
+
+  try {
+    return await csrfRequest;
+  } finally {
+    csrfRequest = null;
+  }
+}
+
+/**
+ * Store the rotated CSRF token returned after login/logout.
+ * @param {string | null | undefined} value
+ */
+export function updateCsrfToken(value) {
+  if (typeof value === "string" && value.length > 0) csrfToken = value;
+}
+
+/**
+ * Build the API URL for JSON requests or a permission-checked resource URL.
+ * @param {string} path
+ * @returns {string}
+ */
+export function apiUrl(path) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE_URL}/${path.replace(/^\/+/, "")}`;
+}
+
+/**
+ * Send a JSON or FormData request using Django's cookie session and CSRF scheme.
+ * The tenant ID is an explicit selector, never an authorization credential;
+ * the backend must still verify active membership on every tenant-scoped API.
+ * @param {string} path
+ * @param {{method?: string, tenantId?: string | null, body?: unknown, headers?: Record<string,string>, signal?: AbortSignal}} [options]
+ * @returns {Promise<any>}
+ */
+export async function apiRequest(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = {
+    Accept: "application/json",
+    ...(options.headers || {}),
+  };
+  if (options.tenantId) headers["X-Tenant-ID"] = options.tenantId;
+
+  let body;
+  if (options.body !== undefined && options.body !== null) {
+    if (
+      typeof FormData !== "undefined" && options.body instanceof FormData
+    ) {
+      body = options.body;
+    } else if (
+      typeof Blob !== "undefined" && options.body instanceof Blob
+    ) {
+      body = options.body;
+    } else if (typeof options.body === "string") {
+      body = options.body;
+      if (!headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+      }
+    } else {
+      body = JSON.stringify(options.body);
+      headers["Content-Type"] = "application/json";
+    }
+  }
+
+  if (!new Set(["GET", "HEAD", "OPTIONS", "TRACE"]).has(method)) {
+    if (!csrfToken) await bootstrapCsrfToken();
+    headers["X-CSRFToken"] = csrfToken;
+  }
+
+  const response = await fetch(apiUrl(path), {
+    method,
+    credentials: "include",
+    headers,
+    body,
+    signal: options.signal,
+    cache: "no-store",
+  });
+  const payload = await parseResponse(response);
+  updateCsrfToken(payload?.csrfToken);
+
+  if (!response.ok) {
+    throw new ApiError(extractErrorMessage(payload, response.status), response.status, payload);
+  }
+  return payload;
+}
+
+/** @param {Response} response */
+async function parseResponse(response) {
+  if (response.status === 204) return null;
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  // Avoid surfacing HTML error pages or server internals to the browser UI.
+  return null;
+}
+
+/** @param {any} payload @param {number} status */
+function extractErrorMessage(payload, status) {
+  if (typeof payload?.detail === "string") return payload.detail;
+  if (typeof payload?.message === "string") return payload.message;
+  if (typeof payload?.non_field_errors?.[0] === "string") {
+    return payload.non_field_errors[0];
+  }
+  if (status === 401) return "Your session is not authenticated. Please sign in.";
+  if (status === 403) return "The request was denied. Check your tenant access and CSRF token.";
+  if (status === 404) return "The requested resource was not found in this workspace.";
+  return `PatentShield request failed (HTTP ${status}).`;
+}
