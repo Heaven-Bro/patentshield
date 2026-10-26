@@ -39,11 +39,57 @@ function statusLabel(status) {
  * Backend page indices are zero-based, while react-pdf page numbers are one-based.
  * @param {Record<string, any>} evidence
  * @param {(page: number) => void} setPage
- * @param {(highlight: {page_index: number, bbox: object | null, exact_quote: string | null}) => void} setActiveHighlight
- * @returns {boolean} True when a page location was available.
+ * @param {(highlight: {page_index:number, bbox:object|null, exact_quote:string|null, quote_verified?:boolean}) => void} setActiveHighlight
+ * @param {string} limitationId
+ * @param {(limitationId:string|null) => void} selectLimitation
+ * @param {Array<Record<string, any>>} patents
+ * @param {object|null} currentPatent
+ * @param {object|null} currentVersion
+ * @param {(patent:object|null, version:object|null) => void} setDocumentContext
+ * @returns {boolean} True when the source document and page can be opened safely.
  */
-function navigateToEvidence(evidence, setPage, setActiveHighlight) {
+function findEvidenceDocument(evidence, patents, currentPatent, currentVersion) {
+  const versionId = evidence.source_version_id;
+  const patentId = evidence.source_patent_id;
+  if (versionId && currentVersion?.id === versionId) {
+    if (!patentId || currentPatent?.id === patentId) {
+      return { patent: currentPatent, version: currentVersion };
+    }
+  }
+  if (!versionId) {
+    return patentId && currentPatent?.id === patentId && currentVersion
+      ? { patent: currentPatent, version: currentVersion }
+      : null;
+  }
+  for (const patent of patents) {
+    if (patentId && patent.id !== patentId) continue;
+    const version = (patent.versions || []).find((item) => item.id === versionId);
+    if (version) return { patent, version };
+  }
+  return null;
+}
+
+function navigateToEvidence(
+  evidence,
+  setPage,
+  setActiveHighlight,
+  limitationId,
+  selectLimitation,
+  patents,
+  currentPatent,
+  currentVersion,
+  setDocumentContext,
+) {
+  selectLimitation(limitationId);
   if (!Number.isInteger(evidence.page_index) || evidence.page_index < 0) return false;
+  const sourceDocument = findEvidenceDocument(evidence, patents, currentPatent, currentVersion);
+  if (!sourceDocument) return false;
+  if (
+    sourceDocument.patent?.id !== currentPatent?.id
+    || sourceDocument.version?.id !== currentVersion?.id
+  ) {
+    setDocumentContext(sourceDocument.patent, sourceDocument.version);
+  }
 
   const bbox = evidence.bbox && typeof evidence.bbox === "object" ? evidence.bbox : null;
   const exactQuote = displayText(evidence.exact_quote) || null;
@@ -52,21 +98,26 @@ function navigateToEvidence(evidence, setPage, setActiveHighlight) {
     page_index: evidence.page_index,
     bbox,
     exact_quote: exactQuote,
+    quote_verified: evidence.quote_verified,
+    source_version_id: evidence.source_version_id || null,
   });
   return true;
 }
 
 /**
  * Interactive limitation matrix connected to Zustand document and analysis stores.
- * @param {{className?: string}} props
+ * @param {{className?: string, patents?: Array<Record<string, any>>}} props
  */
-export default function ClaimMatrix({ className = "" }) {
+export default function ClaimMatrix({ className = "", patents = [] }) {
   const selectedClaim = useMatrixStore((state) => state.selectedClaim);
   const assessments = useMatrixStore((state) => state.assessments);
   const selectedLimitationId = useMatrixStore((state) => state.selectedLimitationId);
   const selectLimitation = useMatrixStore((state) => state.selectLimitation);
   const setPage = useDocumentStore((state) => state.setPage);
   const setActiveHighlight = useDocumentStore((state) => state.setActiveHighlight);
+  const currentPatent = useDocumentStore((state) => state.currentPatent);
+  const currentVersion = useDocumentStore((state) => state.currentVersion);
+  const setDocumentContext = useDocumentStore((state) => state.setDocumentContext);
 
   const rows = useMemo(() => {
     const limitations = Array.isArray(selectedClaim?.limitations)
@@ -199,17 +250,34 @@ export default function ClaimMatrix({ className = "" }) {
                           const quote = displayText(evidence.exact_quote);
                           const hasPage =
                             Number.isInteger(evidence.page_index) && evidence.page_index >= 0;
+                          const sourceDocument = findEvidenceDocument(
+                            evidence,
+                            patents,
+                            currentPatent,
+                            currentVersion,
+                          );
+                          const canOpenSource = hasPage && Boolean(sourceDocument) && Boolean(quote);
 
                           return (
                             <div key={String(evidenceKey)} className="space-y-1.5">
                               <button
                                 type="button"
                                 onClick={() =>
-                                  navigateToEvidence(evidence, setPage, setActiveHighlight)
+                                  navigateToEvidence(
+                                    evidence,
+                                    setPage,
+                                    setActiveHighlight,
+                                    row.limitation_id,
+                                    selectLimitation,
+                                    patents,
+                                    currentPatent,
+                                    currentVersion,
+                                    setDocumentContext,
+                                  )
                                 }
-                                disabled={!hasPage || !quote}
+                                disabled={!canOpenSource}
                                 className="block w-full rounded-md border border-slate-200 bg-white p-2 text-left text-xs leading-5 text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
-                                title={hasPage ? "Open this source location in the PDF" : "Source page is unavailable"}
+                                title={canOpenSource ? "Open this source location in the PDF" : "The source PDF is not linked or available in this tenant"}
                               >
                                 <span className="line-clamp-5">“{quote || "Quote unavailable"}”</span>
                                 {hasPage && (
@@ -218,6 +286,9 @@ export default function ClaimMatrix({ className = "" }) {
                                   </span>
                                 )}
                               </button>
+                              {!sourceDocument && hasPage && (
+                                <p className="text-[10px] text-slate-500">No tenant-local PDF is linked to this citation.</p>
+                              )}
                               <span
                                 className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                                   verified === true
@@ -243,17 +314,31 @@ export default function ClaimMatrix({ className = "" }) {
                     <span className="block font-semibold tabular-nums text-slate-800">
                       {confidence}
                     </span>
-                    {evidenceItems.some(
-                      (item) => Number.isInteger(item.page_index) && item.page_index >= 0,
-                    ) && (
+                    {evidenceItems.some((item) => (
+                      Number.isInteger(item.page_index)
+                      && item.page_index >= 0
+                      && Boolean(findEvidenceDocument(item, patents, currentPatent, currentVersion))
+                    )) && (
                       <button
                         type="button"
                         onClick={() => {
-                          const firstPageEvidence = evidenceItems.find(
-                            (item) => Number.isInteger(item.page_index) && item.page_index >= 0,
-                          );
+                          const firstPageEvidence = evidenceItems.find((item) => (
+                            Number.isInteger(item.page_index)
+                            && item.page_index >= 0
+                            && Boolean(findEvidenceDocument(item, patents, currentPatent, currentVersion))
+                          ));
                           if (firstPageEvidence) {
-                            navigateToEvidence(firstPageEvidence, setPage, setActiveHighlight);
+                            navigateToEvidence(
+                              firstPageEvidence,
+                              setPage,
+                              setActiveHighlight,
+                              row.limitation_id,
+                              selectLimitation,
+                              patents,
+                              currentPatent,
+                              currentVersion,
+                              setDocumentContext,
+                            );
                           }
                         }}
                         className="mt-2 text-xs font-semibold text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900"

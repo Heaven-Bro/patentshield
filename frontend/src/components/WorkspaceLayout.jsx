@@ -23,9 +23,9 @@ function formatMetric(value) {
 /**
  * Dual-pane PatentShield review workspace: PDF viewer on the left and analysis
  * matrix with screening priority metrics on the right.
- * @param {{pdfFile?: string | File | Blob | object | null, className?: string}} props
+ * @param {{pdfFile?: string | File | Blob | object | null, className?: string, patents?: Array<Record<string, any>>}} props
  */
-export default function WorkspaceLayout({ pdfFile = null, className = "" }) {
+export default function WorkspaceLayout({ pdfFile = null, className = "", patents = [] }) {
   const screeningMetrics = useMatrixStore((state) => state.screeningMetrics);
   const score = screeningMetrics?.screening_priority_score;
   const hasScore = typeof score === "number" && Number.isFinite(score);
@@ -76,7 +76,7 @@ export default function WorkspaceLayout({ pdfFile = null, className = "" }) {
           </div>
         </header>
 
-        <ClaimMatrix className="flex-1" />
+        <ClaimMatrix className="flex-1" patents={patents} />
       </section>
     </main>
   );

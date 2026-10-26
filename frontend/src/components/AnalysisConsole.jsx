@@ -51,8 +51,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
   const tenantId = tenant?.id || null;
   const canRunAnalysis = RUN_ROLES.has(tenant?.role);
 
-  const setCurrentPatent = useDocumentStore((state) => state.setPatent);
-  const setCurrentVersion = useDocumentStore((state) => state.setVersion);
+  const setDocumentContext = useDocumentStore((state) => state.setDocumentContext);
   const setAnalysisData = useMatrixStore((state) => state.setAnalysisData);
 
   const [selectedPatentId, setSelectedPatentId] = useState("");
@@ -75,7 +74,6 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
   const [retryBusy, setRetryBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [pollNonce, setPollNonce] = useState(0);
-  const [lastProgressAt, setLastProgressAt] = useState(null);
 
   const selectedPatent = useMemo(
     () => patents.find((patent) => patent.id === selectedPatentId) || null,
@@ -95,6 +93,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     () => claims.find((claim) => claim.id === selectedClaimId) || null,
     [claims, selectedClaimId],
   );
+  const workspaceAnalysisIdRef = useRef(null);
   const canStartAnalysis = canRunAnalysis && selectedPatent?.status === "INDEXED";
 
   const {
@@ -109,51 +108,65 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
   // security boundary; this additionally avoids stale prior-tenant UI flashes.
   useEffect(() => {
     setAnalysisData({});
-    setCurrentPatent(null);
-    setCurrentVersion(null);
+    setDocumentContext(null, null);
     return () => {
       setAnalysisData({});
-      setCurrentPatent(null);
-      setCurrentVersion(null);
+      setDocumentContext(null, null);
     };
-  }, [tenantId, setAnalysisData, setCurrentPatent, setCurrentVersion]);
+  }, [tenantId, setAnalysisData, setDocumentContext]);
 
   useEffect(() => {
-    if (!tenantId || patents.length === 0) {
+    if (!tenantId) return undefined;
+
+    // Schedule selector reconciliation after commit. Patent records refresh while
+    // ingestion runs; cancelling this timer on the next render prevents stale
+    // results from overwriting a newer user selection.
+    const timer = window.setTimeout(() => {
       if (patents.length === 0) {
         setSelectedPatentId("");
         setSelectedVersionId("");
+        return;
       }
-      return;
-    }
-    const selectedIsValid = patents.some((patent) => patent.id === selectedPatentId);
-    if (selectedIsValid) {
-      const patent = patents.find((item) => item.id === selectedPatentId);
-      const versions = (patent?.versions || []).filter(
+      const selectedPatent = patents.find((patent) => patent.id === selectedPatentId);
+      if (selectedPatent) {
+        const versions = (selectedPatent.versions || []).filter(
+          (version) => version.extraction_status === "EXTRACTED",
+        );
+        if (!versions.some((version) => version.id === selectedVersionId)) {
+          setSelectedVersionId(versions[0]?.id || "");
+        }
+        return;
+      }
+      const preferredPatent = patents.find(
+        (patent) => patent.status === "INDEXED"
+          && (patent.versions || []).some((version) => version.extraction_status === "EXTRACTED"),
+      ) || patents[0];
+      const preferredVersion = (preferredPatent?.versions || []).find(
         (version) => version.extraction_status === "EXTRACTED",
       );
-      if (!versions.some((version) => version.id === selectedVersionId)) {
-        setSelectedVersionId(versions[0]?.id || "");
-      }
-      return;
-    }
-    const preferredPatent = patents.find(
-      (patent) => patent.status === "INDEXED"
-        && (patent.versions || []).some((version) => version.extraction_status === "EXTRACTED"),
-    ) || patents[0];
-    const preferredVersion = (preferredPatent?.versions || []).find(
-      (version) => version.extraction_status === "EXTRACTED",
-    );
-    setSelectedPatentId(preferredPatent?.id || "");
-    setSelectedVersionId(preferredVersion?.id || "");
+      setSelectedPatentId(preferredPatent?.id || "");
+      setSelectedVersionId(preferredVersion?.id || "");
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [tenantId, patents, selectedPatentId, selectedVersionId]);
 
+  // Evidence clicks may intentionally switch the visible PDF away from the
+  // target claim. Do not let the patent-list polling effect switch it back.
   useEffect(() => {
-    if (!selectedPatent || !selectedVersion) return;
+    const patent = patents.find((item) => item.id === selectedPatentId) || null;
+    const version = patent?.versions?.find((item) => item.id === selectedVersionId) || null;
+    if (
+      activeAnalysisId
+      && workspaceAnalysisIdRef.current === activeAnalysisId
+      && useDocumentStore.getState().currentVersion
+    ) {
+      return;
+    }
     const current = useDocumentStore.getState();
-    if (current.currentPatent?.id !== selectedPatent.id) setCurrentPatent(selectedPatent);
-    if (current.currentVersion?.id !== selectedVersion.id) setCurrentVersion(selectedVersion);
-  }, [selectedPatent, selectedVersion, setCurrentPatent, setCurrentVersion]);
+    if (current.currentPatent?.id !== patent?.id || current.currentVersion?.id !== version?.id) {
+      setDocumentContext(patent, version);
+    }
+  }, [tenantId, patents, selectedPatentId, selectedVersionId, activeAnalysisId, setDocumentContext]);
 
   const loadHistory = useCallback(async (signal) => {
     if (!tenantId) return;
@@ -179,47 +192,56 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadHistory(controller.signal);
-    return () => controller.abort();
-  }, [loadHistory]);
+    const timer = window.setTimeout(() => {
+      setClaims([]);
+      setSelectedClaimId("");
+      setClaimsError("");
+      if (!tenantId || !selectedPatentId || !selectedVersionId) {
+        setClaimsLoading(false);
+        return;
+      }
+
+      setClaimsLoading(true);
+      apiRequest(
+        `/api/v1/patents/${selectedPatentId}/claims/?document_version_id=${encodeURIComponent(selectedVersionId)}`,
+        { tenantId, signal: controller.signal },
+      )
+        .then((payload) => {
+          if (controller.signal.aborted || useAuthStore.getState().activeTenantId !== tenantId) return;
+          const rows = Array.isArray(payload.results) ? payload.results : [];
+          setClaims(rows);
+          setSelectedClaimId(rows[0]?.id || "");
+        })
+        .catch((error) => {
+          if (controller.signal.aborted || error?.name === "AbortError") return;
+          if (useAuthStore.getState().activeTenantId !== tenantId) return;
+          setClaims([]);
+          setClaimsError(
+            error instanceof Error ? error.message : "Could not load extracted claims.",
+          );
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && useAuthStore.getState().activeTenantId === tenantId) {
+            setClaimsLoading(false);
+          }
+        });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [tenantId, selectedPatentId, selectedVersionId]);
 
   useEffect(() => {
-    setClaims([]);
-    setSelectedClaimId("");
-    setClaimsError("");
-    if (!tenantId || !selectedPatentId || !selectedVersionId) {
-      setClaimsLoading(false);
-      return undefined;
-    }
-
     const controller = new AbortController();
-    setClaimsLoading(true);
-    apiRequest(
-      `/api/v1/patents/${selectedPatentId}/claims/?document_version_id=${encodeURIComponent(selectedVersionId)}`,
-      { tenantId, signal: controller.signal },
-    )
-      .then((payload) => {
-        if (controller.signal.aborted || useAuthStore.getState().activeTenantId !== tenantId) return;
-        const rows = Array.isArray(payload.results) ? payload.results : [];
-        setClaims(rows);
-        setSelectedClaimId(rows[0]?.id || "");
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || error?.name === "AbortError") return;
-        if (useAuthStore.getState().activeTenantId !== tenantId) return;
-        setClaims([]);
-        setClaimsError(
-          error instanceof Error ? error.message : "Could not load extracted claims.",
-        );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && useAuthStore.getState().activeTenantId === tenantId) {
-          setClaimsLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [tenantId, selectedPatentId, selectedVersionId]);
+    const timer = window.setTimeout(() => {
+      void loadHistory(controller.signal);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [loadHistory]);
 
   const loadAnalysisDetail = useCallback(async (analysisId) => {
     if (!tenantId || !analysisId) return null;
@@ -248,11 +270,22 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
       setSelectedPatentId(patent.id);
       setSelectedVersionId(version.id);
       const current = useDocumentStore.getState();
-      if (current.currentPatent?.id !== patent.id) setCurrentPatent(patent);
-      if (current.currentVersion?.id !== version.id) setCurrentVersion(version);
+      // Reset to the target PDF only when opening a different analysis (or when
+      // there is no document context). Periodic REST recovery must not jump the
+      // viewer away from a prior-art PDF the reviewer has intentionally opened.
+      if (
+        workspaceAnalysisIdRef.current !== analysisId
+        || !current.currentVersion
+      ) {
+        setDocumentContext(patent, version);
+      }
+      workspaceAnalysisIdRef.current = analysisId;
+    } else if (workspaceAnalysisIdRef.current !== analysisId) {
+      setDocumentContext(null, null);
+      workspaceAnalysisIdRef.current = analysisId;
     }
     return record;
-  }, [tenantId, patents, setAnalysisData, setCurrentPatent, setCurrentVersion]);
+  }, [tenantId, patents, setAnalysisData, setDocumentContext]);
 
   const loadReportStatus = useCallback(async (analysisId) => {
     if (!tenantId || !analysisId) return null;
@@ -267,8 +300,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     return payload;
   }, [tenantId]);
 
-  const refreshCurrentAnalysisRef = useRef(null);
-  refreshCurrentAnalysisRef.current = async (analysisId) => {
+  const refreshCurrentAnalysis = useCallback(async (analysisId) => {
     const analysis = await loadAnalysisDetail(analysisId);
     if (!analysis) return null;
     let exportInfo = null;
@@ -283,7 +315,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
       analysisStatus: analysis.status,
       exportStatus: exportInfo?.export_status || analysis.report_export_status || "NOT_REQUESTED",
     };
-  };
+  }, [loadAnalysisDetail, loadReportStatus]);
 
   useEffect(() => {
     if (!activeAnalysisId || !tenantId) return undefined;
@@ -292,7 +324,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
 
     const poll = async () => {
       try {
-        const current = await refreshCurrentAnalysisRef.current?.(activeAnalysisId);
+        const current = await refreshCurrentAnalysis(activeAnalysisId);
         if (cancelled || !current) return;
         const shouldContinue = ANALYSIS_ACTIVE.has(current.analysisStatus)
           || EXPORT_ACTIVE.has(current.exportStatus);
@@ -307,15 +339,16 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
       cancelled = true;
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [activeAnalysisId, tenantId, pollNonce]);
+  }, [activeAnalysisId, tenantId, pollNonce, refreshCurrentAnalysis]);
 
   useEffect(() => {
-    if (!lastEvent || !activeAnalysisId) return;
-    setLastProgressAt(lastEvent.receivedAt || Date.now());
-    if (["job.completed", "report.completed"].includes(lastEvent.type)) {
+    if (!lastEvent || !activeAnalysisId) return undefined;
+    if (!["job.completed", "report.completed"].includes(lastEvent.type)) return undefined;
+    const timer = window.setTimeout(() => {
       setPollNonce((value) => value + 1);
       void loadHistory();
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [lastEvent, activeAnalysisId, loadHistory]);
 
   const handlePatentChange = (patentId) => {
@@ -326,12 +359,12 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     setSelectedPatentId(patentId);
     setSelectedVersionId(version?.id || "");
     setSelectedClaimId("");
+    workspaceAnalysisIdRef.current = null;
     setActiveAnalysisId(null);
     setAnalysisStatus(null);
     setExportStatus("NOT_REQUESTED");
     setAnalysisData({});
-    setCurrentPatent(patent);
-    setCurrentVersion(version);
+    setDocumentContext(patent, version);
     setConsoleError("");
   };
 
@@ -339,12 +372,12 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     const version = availableVersions.find((item) => item.id === versionId) || null;
     setSelectedVersionId(versionId);
     setSelectedClaimId("");
+    workspaceAnalysisIdRef.current = null;
     setActiveAnalysisId(null);
     setAnalysisStatus(null);
     setExportStatus("NOT_REQUESTED");
     setAnalysisData({});
-    setCurrentPatent(selectedPatent);
-    setCurrentVersion(version);
+    setDocumentContext(selectedPatent, version);
     setConsoleError("");
   };
 
@@ -366,6 +399,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
       });
       const created = response.analysis;
       if (!created?.id) throw new Error("The server did not return an analysis identifier.");
+      workspaceAnalysisIdRef.current = null;
       setActiveAnalysisId(created.id);
       setAnalysisStatus(created.status || "QUEUED");
       setAnalysisErrorCode(null);
@@ -392,8 +426,10 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
 
   const handleSelectAnalysis = (analysisId) => {
     setConsoleError("");
+    workspaceAnalysisIdRef.current = null;
+    setAnalysisData({});
+    setDocumentContext(null, null);
     setActiveAnalysisId(analysisId);
-    setLastProgressAt(null);
     setPollNonce((value) => value + 1);
   };
 
@@ -401,6 +437,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     if (!activeAnalysisId || !tenantId) return;
     setRetryBusy(true);
     setConsoleError("");
+    workspaceAnalysisIdRef.current = null;
     try {
       const response = await apiRequest(`/api/v1/analyses/${activeAnalysisId}/retry/`, {
         method: "POST",
@@ -457,6 +494,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     }
   };
 
+  const lastProgressAt = lastEvent?.receivedAt || null;
   const progressValue = ANALYSIS_SUCCESS.has(analysisStatus) || analysisStatus === "FAILED"
     ? 100
     : Math.max(0, Math.min(100, Number(analysisProgress?.progress) || 0));
@@ -608,7 +646,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
 
       {activeAnalysisId && (
         <div className="mt-5 h-[min(78vh,900px)] min-h-[520px]">
-          <WorkspaceLayout className="!h-full" />
+          <WorkspaceLayout patents={patents} className="!h-full" />
         </div>
       )}
       {activeAnalysisId && activeAnalysis && analysisStatus === "FAILED" && (
