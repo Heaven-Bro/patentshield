@@ -164,7 +164,7 @@ class AnalysisListCreateView(APIView):
             )
             AuditLog.objects.create(
                 tenant_id=tenant.pk,
-                actor_user=request.user,
+                actor_user_id=request.user.pk,
                 action="CREATE_PATENT_ANALYSIS",
                 resource_type="AnalysisReport",
                 resource_id=analysis.pk,
@@ -207,7 +207,7 @@ class AnalysisListCreateView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user=request.user,
+                    actor_user_id=request.user.pk,
                     action="QUEUE_PATENT_ANALYSIS",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -292,7 +292,7 @@ class AnalysisRetryView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user=request.user,
+                    actor_user_id=request.user.pk,
                     action="RETRY_PATENT_ANALYSIS",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -327,7 +327,7 @@ class AnalysisRetryView(APIView):
                 )
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user=request.user,
+                    actor_user_id=request.user.pk,
                     action="QUEUE_PATENT_ANALYSIS_RETRY",
                     resource_type="AnalysisReport",
                     resource_id=analysis.pk,
@@ -455,7 +455,7 @@ class AnalysisReviewView(APIView):
 
                 AuditLog.objects.create(
                     tenant_id=tenant.pk,
-                    actor_user=request.user,
+                    actor_user_id=request.user.pk,
                     action="REVIEW_CLAIM_ASSESSMENT",
                     resource_type="ClaimAssessment",
                     resource_id=assessment.pk,

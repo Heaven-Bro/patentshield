@@ -1,4 +1,4 @@
-"""Asynchronous JSON and PDF export task for analysis reports."""
+"""Asynchronous, tenant-scoped JSON and PDF analysis exports."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ import logging
 from collections import defaultdict
 from typing import Any
 
+from asgiref.sync import async_to_sync
 from celery import Task, shared_task
-from django.conf import settings
+from channels.layers import get_channel_layer
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
@@ -17,20 +18,26 @@ from django.utils import timezone
 from xml.sax.saxutils import escape
 
 from analyses.models import AnalysisReport, ClaimAssessment, EvidenceReference
+from audit.models import AuditLog
 
 logger = logging.getLogger(__name__)
 
+_EXPORTABLE_ANALYSIS_STATUSES = {
+    AnalysisReport.Status.COMPLETED,
+    AnalysisReport.Status.COMPLETED_WITH_WARNINGS,
+}
 
-@shared_task(bind=True, queue="exports")
+
+@shared_task(bind=True, queue="exports", max_retries=2)
 def generate_analysis_report(
     self: Task,
     analysis_id: str,
-) -> dict[str, str | int]:
-    """Create tenant-owned JSON and PDF snapshots for an analysis report.
+) -> dict[str, str | int | bool]:
+    """Create a consistent JSON/PDF snapshot without mutating analysis status.
 
-    Report data is read through tenant-filtered querysets and linked objects are
-    checked for tenant consistency before any document is generated. The task
-    marks the report completed only after both artifacts have been persisted.
+    Report export state is tracked independently from the analysis lifecycle.
+    Only one task may own an export at a time. Both artifacts must be persisted
+    before their storage keys and COMPLETED state are committed to PostgreSQL.
     """
     json_storage_key: str | None = None
     pdf_storage_key: str | None = None
@@ -42,20 +49,29 @@ def generate_analysis_report(
                 "tenant",
                 "patent",
                 "target_document_version",
+                "target_claim",
+                "created_by",
             )
             .get(pk=analysis_id)
         )
         _validate_report_relations(report)
-        now = timezone.now()
-        AnalysisReport.objects.filter(
-            pk=report.pk,
-            tenant_id=report.tenant_id,
-        ).update(
-            status=AnalysisReport.Status.EXPORTING,
-            started_at=report.started_at or now,
-            completed_at=None,
-            error_code=None,
-            updated_at=now,
+        report, claimed = _claim_report_export(report.pk, self)
+        if not claimed:
+            return {
+                "analysis_id": str(report.pk),
+                "export_status": report.report_export_status,
+                "skipped": True,
+            }
+
+        _publish_report_event(
+            str(report.pk),
+            "report.progress",
+            {
+                "analysis_id": str(report.pk),
+                "export_status": AnalysisReport.ReportExportStatus.RUNNING,
+                "stage": "loading_results",
+                "progress": 5,
+            },
         )
 
         assessments = list(
@@ -83,6 +99,16 @@ def generate_analysis_report(
         for evidence in evidence_rows:
             evidence_by_assessment[str(evidence.assessment_id)].append(evidence)
 
+        _publish_report_event(
+            str(report.pk),
+            "report.progress",
+            {
+                "analysis_id": str(report.pk),
+                "export_status": AnalysisReport.ReportExportStatus.RUNNING,
+                "stage": "compiling_snapshot",
+                "progress": 25,
+            },
+        )
         generated_at = timezone.now()
         snapshot = _build_snapshot(
             report=report,
@@ -101,6 +127,16 @@ def generate_analysis_report(
         output_dir = f"reports/{report.tenant_id}"
         json_target = f"{output_dir}/{report.pk}.json"
         pdf_target = f"{output_dir}/{report.pk}.pdf"
+        _publish_report_event(
+            str(report.pk),
+            "report.progress",
+            {
+                "analysis_id": str(report.pk),
+                "export_status": AnalysisReport.ReportExportStatus.RUNNING,
+                "stage": "writing_artifacts",
+                "progress": 75,
+            },
+        )
         json_storage_key = _save_at_key(json_target, json_bytes)
         pdf_storage_key = _save_at_key(pdf_target, pdf_bytes)
 
@@ -110,22 +146,52 @@ def generate_analysis_report(
                 .select_for_update()
                 .get(pk=report.pk)
             )
+            if locked_report.report_export_task_id != self.request.id:
+                raise RuntimeError("Report export ownership changed during execution.")
             locked_report.report_json_storage_key = json_storage_key
             locked_report.report_storage_key = pdf_storage_key
-            locked_report.status = AnalysisReport.Status.COMPLETED
-            locked_report.completed_at = timezone.now()
-            locked_report.error_code = None
+            locked_report.report_export_status = (
+                AnalysisReport.ReportExportStatus.COMPLETED
+            )
+            locked_report.report_export_error_code = None
+            locked_report.report_generated_at = timezone.now()
             locked_report.save(
                 update_fields=(
                     "report_json_storage_key",
                     "report_storage_key",
-                    "status",
-                    "completed_at",
-                    "error_code",
+                    "report_export_status",
+                    "report_export_error_code",
+                    "report_generated_at",
                     "updated_at",
                 )
             )
+            AuditLog.objects.create(
+                tenant_id=locked_report.tenant_id,
+                actor_user_id=locked_report.created_by_id,
+                action="ANALYSIS_REPORT_EXPORT_COMPLETED",
+                resource_type="AnalysisReport",
+                resource_id=locked_report.pk,
+                request_id=str(self.request.id or "")[:100] or None,
+                outcome=AuditLog.Outcome.SUCCESS,
+                metadata={
+                    "task_id": str(self.request.id or ""),
+                    "assessment_count": len(assessments),
+                    "evidence_count": len(evidence_rows),
+                    "formats": ["JSON", "PDF"],
+                },
+            )
 
+        _publish_report_event(
+            str(report.pk),
+            "report.completed",
+            {
+                "analysis_id": str(report.pk),
+                "export_status": AnalysisReport.ReportExportStatus.COMPLETED,
+                "progress": 100,
+                "artifacts": {"pdf": True, "json": True},
+                "generated_at": timezone.now().isoformat(),
+            },
+        )
         logger.info(
             "Generated report artifacts for analysis %s (tenant=%s).",
             report.pk,
@@ -134,7 +200,7 @@ def generate_analysis_report(
         return {
             "analysis_id": str(report.pk),
             "tenant_id": str(report.tenant_id),
-            "status": AnalysisReport.Status.COMPLETED,
+            "export_status": AnalysisReport.ReportExportStatus.COMPLETED,
             "assessment_count": len(assessments),
             "evidence_count": len(evidence_rows),
             "json_storage_key": json_storage_key,
@@ -142,36 +208,182 @@ def generate_analysis_report(
         }
 
     except Exception as exc:
-        for storage_key in (pdf_storage_key, json_storage_key):
-            if storage_key:
-                try:
-                    if default_storage.exists(storage_key):
-                        default_storage.delete(storage_key)
-                except Exception:
-                    logger.warning(
-                        "Unable to clean up incomplete report artifact %s.",
-                        storage_key,
-                        exc_info=True,
-                    )
-        if report is not None:
+        _cleanup_partial_artifacts(pdf_storage_key, json_storage_key)
+        if report is None:
             try:
-                AnalysisReport.objects.for_tenant(report.tenant_id).filter(
-                    pk=report.pk
-                ).update(
-                    status=AnalysisReport.Status.FAILED,
-                    error_code=type(exc).__name__[:100],
-                    updated_at=timezone.now(),
+                report = AnalysisReport.objects.select_related("created_by").get(
+                    pk=analysis_id
                 )
+            except (AnalysisReport.DoesNotExist, ValueError, TypeError):
+                report = None
+
+        retries = int(getattr(self.request, "retries", 0))
+        max_retries = int(getattr(self, "max_retries", 2))
+        should_retry = retries < max_retries
+        if report is not None:
+            next_status = (
+                AnalysisReport.ReportExportStatus.QUEUED
+                if should_retry
+                else AnalysisReport.ReportExportStatus.FAILED
+            )
+            error_code = "RETRY_SCHEDULED" if should_retry else type(exc).__name__[:100]
+            try:
+                with transaction.atomic():
+                    locked_report = (
+                        AnalysisReport.objects.for_tenant(report.tenant_id)
+                        .select_for_update()
+                        .get(pk=report.pk)
+                    )
+                    if locked_report.report_export_task_id == self.request.id:
+                        locked_report.report_export_status = next_status
+                        locked_report.report_export_error_code = error_code
+                        locked_report.save(
+                            update_fields=(
+                                "report_export_status",
+                                "report_export_error_code",
+                                "updated_at",
+                            )
+                        )
+                        if not should_retry:
+                            AuditLog.objects.create(
+                                tenant_id=locked_report.tenant_id,
+                                actor_user_id=locked_report.created_by_id,
+                                action="ANALYSIS_REPORT_EXPORT_FAILED",
+                                resource_type="AnalysisReport",
+                                resource_id=locked_report.pk,
+                                request_id=str(self.request.id or "")[:100] or None,
+                                outcome=AuditLog.Outcome.FAILURE,
+                                metadata={"error_type": type(exc).__name__},
+                            )
             except Exception:
                 logger.exception(
-                    "Unable to mark analysis report %s as failed.",
+                    "Unable to persist report export failure for analysis %s.",
                     report.pk,
                 )
-        logger.exception(
-            "Report generation failed for analysis ID %s.",
+
+            if should_retry:
+                _publish_report_event(
+                    str(report.pk),
+                    "report.progress",
+                    {
+                        "analysis_id": str(report.pk),
+                        "export_status": AnalysisReport.ReportExportStatus.QUEUED,
+                        "stage": "retry_scheduled",
+                        "retry_attempt": retries + 1,
+                    },
+                )
+            else:
+                _publish_report_event(
+                    str(report.pk),
+                    "report.completed",
+                    {
+                        "analysis_id": str(report.pk),
+                        "export_status": AnalysisReport.ReportExportStatus.FAILED,
+                        "progress": 100,
+                        "error_code": type(exc).__name__,
+                    },
+                )
+
+        logger.error(
+            "Report generation failed for analysis_id=%s error_type=%s.",
             analysis_id,
+            type(exc).__name__,
+            exc_info=True,
         )
+        if should_retry:
+            raise self.retry(
+                exc=exc,
+                countdown=min(30 * (retries + 1), 120),
+            )
         raise
+
+
+def _claim_report_export(
+    analysis_id: Any,
+    task: Task,
+) -> tuple[AnalysisReport, bool]:
+    """Lock and claim the export unless another delivery already owns it."""
+    with transaction.atomic():
+        report = (
+            AnalysisReport.objects.select_for_update()
+            .select_related("tenant", "patent", "target_document_version", "created_by")
+            .get(pk=analysis_id)
+        )
+        if report.status not in _EXPORTABLE_ANALYSIS_STATUSES:
+            raise ValueError("Only completed analyses can be exported.")
+
+        export_status = report.report_export_status
+        task_id = str(task.request.id or "")
+        delivery_info = getattr(task.request, "delivery_info", None) or {}
+        is_redelivered = bool(delivery_info.get("redelivered"))
+        retry_attempt = int(getattr(task.request, "retries", 0)) > 0
+        same_task = bool(task_id and report.report_export_task_id == task_id)
+
+        if export_status == AnalysisReport.ReportExportStatus.COMPLETED:
+            if report.report_storage_key and report.report_json_storage_key:
+                return report, False
+        elif export_status == AnalysisReport.ReportExportStatus.RUNNING:
+            if not (same_task and (retry_attempt or is_redelivered)):
+                return report, False
+        elif export_status != AnalysisReport.ReportExportStatus.QUEUED:
+            raise ValueError("Report export was not queued for execution.")
+
+        if report.report_export_task_id and not same_task:
+            return report, False
+
+        report.report_export_status = AnalysisReport.ReportExportStatus.RUNNING
+        report.report_export_error_code = None
+        if not report.report_export_task_id:
+            report.report_export_task_id = task_id or None
+        report.save(
+            update_fields=(
+                "report_export_status",
+                "report_export_error_code",
+                "report_export_task_id",
+                "updated_at",
+            )
+        )
+        return report, True
+
+
+def _cleanup_partial_artifacts(
+    pdf_storage_key: str | None,
+    json_storage_key: str | None,
+) -> None:
+    """Remove artifacts created by a failed export attempt when possible."""
+    for storage_key in (pdf_storage_key, json_storage_key):
+        if not storage_key:
+            continue
+        try:
+            if default_storage.exists(storage_key):
+                default_storage.delete(storage_key)
+        except Exception:
+            logger.warning(
+                "Unable to clean up incomplete report artifact.", exc_info=True
+            )
+
+
+def _publish_report_event(
+    analysis_id: str,
+    event_type: str,
+    data: dict[str, Any],
+) -> None:
+    """Broadcast export progress best-effort; persistence remains authoritative."""
+    try:
+        channel_layer = get_channel_layer()
+        if channel_layer is None:
+            return
+        async_to_sync(channel_layer.group_send)(
+            f"analysis_{analysis_id}",
+            {"type": event_type, "data": data},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Report progress event was not delivered for analysis_id=%s "
+            "error_type=%s.",
+            analysis_id,
+            type(exc).__name__,
+        )
 
 
 def _validate_report_relations(report: AnalysisReport) -> None:
@@ -182,6 +394,12 @@ def _validate_report_relations(report: AnalysisReport) -> None:
         raise ValueError("Analysis document belongs to a different tenant.")
     if report.target_document_version.patent_id != report.patent_id:
         raise ValueError("Analysis document version belongs to a different patent.")
+    if report.target_claim_id and (
+        report.target_claim.tenant_id != report.tenant_id
+        or report.target_claim.patent_id != report.patent_id
+        or report.target_claim.document_version_id != report.target_document_version_id
+    ):
+        raise ValueError("Analysis target claim has inconsistent provenance.")
 
 
 def _validate_assessment_relations(
@@ -226,6 +444,12 @@ def _validate_evidence_relations(
             raise ValueError(
                 "Evidence document version belongs to a different tenant."
             )
+        if (
+            evidence.source_patent is not None
+            and evidence.source_document_version is not None
+            and evidence.source_document_version.patent_id != evidence.source_patent_id
+        ):
+            raise ValueError("Evidence patent and version provenance do not match.")
 
 
 def _build_snapshot(
@@ -299,10 +523,10 @@ def _build_snapshot(
         "analysis": {
             "analysis_id": str(report.pk),
             "analysis_type": report.analysis_type,
-            "status": AnalysisReport.Status.COMPLETED,
+            "status": report.status,
             "created_at": _isoformat(report.created_at),
             "started_at": _isoformat(report.started_at),
-            "completed_at": generated_at.isoformat(),
+            "completed_at": _isoformat(report.completed_at),
             "configuration": _redact_sensitive_values(report.configuration),
             "model_versions": _redact_sensitive_values(report.model_versions),
             "score_version": report.score_version,
