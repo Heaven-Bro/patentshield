@@ -6,10 +6,12 @@ import PatentsDashboard from "./components/PatentsDashboard";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
+import { useDocumentStore } from "./stores/documentStore";
+import { useMatrixStore } from "./stores/matrixStore";
 
 /**
  * Root authentication gate and tenant-aware application shell.
- * Workspace analysis rendering is integrated in the dedicated workspace phase.
+ * Authenticated tenant shell connecting document ingestion and analysis review.
  */
 export default function App() {
   const status = useAuthStore((state) => state.status);
@@ -90,9 +92,11 @@ export default function App() {
         tenantId: activeTenantId,
         signal,
       });
+      if (signal?.aborted || useAuthStore.getState().activeTenantId !== activeTenantId) return;
       setPatents(Array.isArray(response.results) ? response.results : []);
     } catch (error) {
-      if (error?.name === "AbortError") return;
+      if (error?.name === "AbortError" || signal?.aborted) return;
+      if (useAuthStore.getState().activeTenantId !== activeTenantId) return;
       if (error instanceof ApiError && error.status === 401) {
         setPatents([]);
         setPatentsError("");
@@ -111,15 +115,48 @@ export default function App() {
   useEffect(() => {
     if (status !== "authenticated" || !activeTenantId) return undefined;
     const controller = new AbortController();
-    void loadPatents(controller.signal);
-    return () => controller.abort();
+    const timer = window.setTimeout(() => {
+      void loadPatents(controller.signal);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [activeTenantId, loadPatents, refreshCounter, status]);
+
+  // Continue refreshing the library while extraction or embedding is active.
+  // This makes the upload form's status visible without requiring a page reload.
+  useEffect(() => {
+    if (status !== "authenticated" || !activeTenantId) return undefined;
+    const hasPendingWork = patents.some((patent) => {
+      const patentPending = ["UPLOADED", "PROCESSING"].includes(patent.status);
+      const versionPending = Array.isArray(patent.versions) && patent.versions.some(
+        (version) => ["PENDING", "EXTRACTING"].includes(version.extraction_status),
+      );
+      return patentPending || versionPending;
+    });
+    if (!hasPendingWork) return undefined;
+    const timer = window.setTimeout(() => {
+      setRefreshCounter((value) => value + 1);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [activeTenantId, patents, status]);
+
+  const refreshPatentLibrary = useCallback(() => {
+    setRefreshCounter((value) => value + 1);
+  }, []);
+
+  const resetWorkspaceState = useCallback(() => {
+    useDocumentStore.getState().setDocumentContext(null, null);
+    useMatrixStore.getState().setAnalysisData({});
+  }, []);
 
   function handleTenantChange(tenantId) {
     // Clear prior-tenant rows in the same event that changes the tenant context.
     setPatents([]);
     setPatentsError("");
     setPatentsLoading(false);
+    resetWorkspaceState();
     setActiveTenant(tenantId);
   }
 
@@ -153,10 +190,12 @@ export default function App() {
       await apiRequest("/api/v1/auth/logout/", { method: "POST" });
       setAnonymous();
       setPatents([]);
+      resetWorkspaceState();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setAnonymous();
         setPatents([]);
+        resetWorkspaceState();
       } else {
         setLogoutError(
           error instanceof Error ? error.message : "Sign out failed; please retry.",
@@ -257,14 +296,15 @@ export default function App() {
             patents={patents}
             loading={patentsLoading}
             error={patentsError}
-            onRetry={() => setRefreshCounter((value) => value + 1)}
-            onRefresh={() => setRefreshCounter((value) => value + 1)}
+            onRetry={refreshPatentLibrary}
+            onRefresh={refreshPatentLibrary}
+            onUploadSubmitted={refreshPatentLibrary}
           />
           <AnalysisConsole
             key={activeTenant.id}
             tenant={activeTenant}
             patents={patents}
-            onRefreshPatents={() => setRefreshCounter((value) => value + 1)}
+            onRefreshPatents={refreshPatentLibrary}
           />
         </>
       )}

@@ -1,8 +1,16 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const MAX_BACKOFF_MS = 30000;
 const STABLE_CONNECTION_MS = 15000;
+
+const EMPTY_SESSION = Object.freeze({
+  connectionState: "idle",
+  lastEvent: null,
+  analysisProgress: null,
+  reportProgress: null,
+  reconnectAttempt: 0,
+});
 
 function makeWebSocketUrl(analysisId) {
   const configuredWsBase = import.meta.env.VITE_WS_BASE_URL;
@@ -21,30 +29,43 @@ function makeWebSocketUrl(analysisId) {
 
 /**
  * Maintain an authenticated progress socket with bounded exponential retries.
- * The socket intentionally remains open after analysis completion because a
- * report export can be requested later on the same analysis channel group.
- * REST polling in the console remains the authoritative recovery mechanism.
+ * State is keyed by analysis ID so a newly selected analysis never briefly
+ * displays the prior analysis's progress while React runs effect cleanup.
+ * The socket stays open after analysis completion because report export can be
+ * requested later on the same analysis channel group.
  *
- * @param {{analysisId:string|null, enabled?:boolean}} options
- * @returns {{connectionState:string, lastEvent:object|null, analysisProgress:object|null, reportProgress:object|null, reconnectAttempt:number}}
+ * @param {{analysisId: string | null, enabled?: boolean}} options
+ * @returns {{connectionState: string, lastEvent: object | null, analysisProgress: object | null, reportProgress: object | null, reconnectAttempt: number}}
  */
 export function useAnalysisProgress({ analysisId, enabled = true }) {
-  const [connectionState, setConnectionState] = useState("idle");
-  const [lastEvent, setLastEvent] = useState(null);
-  const [analysisProgress, setAnalysisProgress] = useState(null);
-  const [reportProgress, setReportProgress] = useState(null);
-  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [storedState, setStoredState] = useState({
+    analysisId: null,
+    ...EMPTY_SESSION,
+  });
+
+  const updateState = useCallback((patch) => {
+    setStoredState((previous) => {
+      const base = previous.analysisId === analysisId
+        ? previous
+        : {
+          analysisId,
+          ...EMPTY_SESSION,
+          connectionState: enabled && analysisId ? "connecting" : "idle",
+        };
+      return { ...base, ...patch, analysisId };
+    });
+  }, [analysisId, enabled]);
+
+  const currentState = storedState.analysisId === analysisId
+    ? storedState
+    : {
+      analysisId,
+      ...EMPTY_SESSION,
+      connectionState: enabled && analysisId ? "connecting" : "idle",
+    };
 
   useEffect(() => {
-    setLastEvent(null);
-    setAnalysisProgress(null);
-    setReportProgress(null);
-    setReconnectAttempt(0);
-
-    if (!enabled || !analysisId) {
-      setConnectionState("idle");
-      return undefined;
-    }
+    if (!enabled || !analysisId) return undefined;
 
     let disposed = false;
     let socket = null;
@@ -56,12 +77,11 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
     const scheduleReconnect = (permanentFailure = false) => {
       if (disposed) return;
       if (permanentFailure || attempt >= MAX_RECONNECT_ATTEMPTS) {
-        setConnectionState("disconnected");
+        updateState({ connectionState: "disconnected" });
         return;
       }
       attempt += 1;
-      setReconnectAttempt(attempt);
-      setConnectionState("reconnecting");
+      updateState({ reconnectAttempt: attempt, connectionState: "reconnecting" });
       const exponential = Math.min(1000 * (2 ** (attempt - 1)), MAX_BACKOFF_MS);
       const jitter = Math.floor(Math.random() * 350);
       retryTimer = window.setTimeout(connect, exponential + jitter);
@@ -69,12 +89,12 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
 
     const connect = () => {
       if (disposed) return;
-      setConnectionState(attempt > 0 ? "reconnecting" : "connecting");
+      updateState({ connectionState: attempt > 0 ? "reconnecting" : "connecting" });
       let url;
       try {
         url = makeWebSocketUrl(analysisId);
       } catch {
-        setConnectionState("unavailable");
+        updateState({ connectionState: "unavailable" });
         return;
       }
 
@@ -90,15 +110,13 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
       candidate.onopen = () => {
         if (disposed) return;
         openedAt = Date.now();
-        setConnectionState("connected");
+        updateState({ connectionState: "connected" });
         if (stabilityTimer !== null) window.clearTimeout(stabilityTimer);
-        // Reset the retry budget only when a connection proves stable. A
-        // server that repeatedly accepts and quickly drops a socket must not
-        // cause an unbounded rapid reconnect loop.
+        // Reset the retry budget only after the connection stays healthy.
         stabilityTimer = window.setTimeout(() => {
           if (!disposed && candidate.readyState === WebSocket.OPEN) {
             attempt = 0;
-            setReconnectAttempt(0);
+            updateState({ reconnectAttempt: 0 });
           }
           stabilityTimer = null;
         }, STABLE_CONNECTION_MS);
@@ -118,22 +136,19 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
           data: message.data && typeof message.data === "object" ? message.data : {},
           receivedAt: Date.now(),
         };
-        setLastEvent(event);
-
+        const patch = { lastEvent: event };
         if (["job.progress", "node.completed", "job.completed"].includes(event.type)) {
-          setAnalysisProgress(event.data);
+          patch.analysisProgress = event.data;
         }
         if (["report.progress", "report.completed"].includes(event.type)) {
-          setReportProgress(event.data);
+          patch.reportProgress = event.data;
         }
-        // Do not close the socket on job.completed: report progress can start
-        // later, so both workflows share this authenticated connection.
+        updateState(patch);
       };
 
       candidate.onerror = () => {
-        if (!disposed) setConnectionState("reconnecting");
-        // Browsers dispatch close after most socket errors; only close performs
-        // the retry scheduling, preventing duplicate timers.
+        if (!disposed) updateState({ connectionState: "reconnecting" });
+        // Browsers usually emit close after an error; close owns retry timing.
       };
 
       candidate.onclose = (closeEvent) => {
@@ -144,19 +159,17 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
         }
         const connectionDuration = openedAt ? Date.now() - openedAt : 0;
         openedAt = 0;
-        // Do not hammer the server with retries when session authorization is
-        // known to have failed. The user can re-authenticate or select again.
         if ([4401, 4403].includes(closeEvent.code)) {
-          setConnectionState("unauthorized");
+          updateState({ connectionState: "unauthorized" });
           return;
         }
         if (closeEvent.code === 4400) {
-          setConnectionState("disconnected");
+          updateState({ connectionState: "disconnected" });
           return;
         }
         if (connectionDuration >= STABLE_CONNECTION_MS) {
           attempt = 0;
-          setReconnectAttempt(0);
+          updateState({ reconnectAttempt: 0 });
         }
         scheduleReconnect();
       };
@@ -172,22 +185,19 @@ export function useAnalysisProgress({ analysisId, enabled = true }) {
         socket.onmessage = null;
         socket.onerror = null;
         socket.onclose = null;
-        if (
-          socket.readyState === WebSocket.OPEN
-          || socket.readyState === WebSocket.CONNECTING
-        ) {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
           socket.close(1000, "View changed");
         }
       }
     };
-  }, [analysisId, enabled]);
+  }, [analysisId, enabled, updateState]);
 
   return {
-    connectionState,
-    lastEvent,
-    analysisProgress,
-    reportProgress,
-    reconnectAttempt,
+    connectionState: !enabled || !analysisId ? "idle" : currentState.connectionState,
+    lastEvent: currentState.lastEvent,
+    analysisProgress: currentState.analysisProgress,
+    reportProgress: currentState.reportProgress,
+    reconnectAttempt: currentState.reconnectAttempt,
   };
 }
 

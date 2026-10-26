@@ -23,11 +23,26 @@ export const useMatrixStore = create((set) => ({
    * @param {{selectedClaim?: object | null, assessments?: Array<Record<string, any>>, screeningMetrics?: Record<string, any> | null}} data
    */
   setAnalysisData: (data = {}) =>
-    set({
-      selectedClaim: data.selectedClaim ?? null,
-      assessments: Array.isArray(data.assessments) ? data.assessments : [],
-      screeningMetrics: data.screeningMetrics ?? null,
-      selectedLimitationId: null,
+    set((state) => {
+      const selectedClaim = data.selectedClaim ?? null;
+      const assessments = Array.isArray(data.assessments) ? data.assessments : [];
+      const limitationIds = new Set([
+        ...(Array.isArray(selectedClaim?.limitations)
+          ? selectedClaim.limitations.map((item) => String(item?.limitation_id || ""))
+          : []),
+        ...assessments.map((item) => String(item?.limitation_id || "")),
+      ].filter(Boolean));
+      const keepSelection = Boolean(
+        state.selectedLimitationId && limitationIds.has(state.selectedLimitationId),
+      );
+      return {
+        selectedClaim,
+        assessments,
+        screeningMetrics: data.screeningMetrics ?? null,
+        // REST polling refreshes rows during long analyses; keep the reviewer’s
+        // selected limitation when it still belongs to the same response.
+        selectedLimitationId: keepSelection ? state.selectedLimitationId : null,
+      };
     }),
 
   /** @param {string | null} limitationId */

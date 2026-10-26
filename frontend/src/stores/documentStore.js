@@ -13,6 +13,8 @@ import { create } from "zustand";
  * @property {number} page_index Zero-based PDF page index.
  * @property {NormalizedBoundingBox | null} bbox Normalized page-relative bounds, if known.
  * @property {string | null} exact_quote Exact source quote associated with the highlight.
+ * @property {boolean | undefined} quote_verified Whether the server guardrail verified the quote.
+ * @property {string | null | undefined} source_version_id The cited source document version, if returned.
  */
 
 /**
@@ -25,6 +27,7 @@ import { create } from "zustand";
  * @property {ActiveHighlight | null} activeHighlight
  * @property {(patent: object | null) => void} setPatent
  * @property {(version: object | null) => void} setVersion
+ * @property {(patent: object | null, version: object | null) => void} setDocumentContext
  * @property {(page: number) => void} setPage
  * @property {(zoom: number) => void} setZoom
  * @property {(highlight: ActiveHighlight | null) => void} setActiveHighlight
@@ -53,11 +56,41 @@ export const useDocumentStore = create((set, get) => ({
 
   /** @param {object | null} version */
   setVersion: (version) =>
-    set({
-      currentVersion: version,
-      currentPage: 1,
-      totalPages: 0,
-      activeHighlight: null,
+    set((state) => {
+      if (state.currentVersion?.id === version?.id) {
+        return state;
+      }
+      return {
+        currentVersion: version,
+        currentPage: 1,
+        totalPages: 0,
+        activeHighlight: null,
+      };
+    }),
+
+  /**
+   * Atomically synchronize the selected patent and version. Switching versions
+   * resets page, page count, and citation selection to prevent stale overlays.
+   * Re-selecting the same version preserves the user's page and zoom context.
+   * @param {object | null} patent
+   * @param {object | null} version
+   */
+  setDocumentContext: (patent, version) =>
+    set((state) => {
+      const samePatent = state.currentPatent?.id === patent?.id;
+      const sameVersion = state.currentVersion?.id === version?.id;
+      if (samePatent && sameVersion) return state;
+      return {
+        currentPatent: patent,
+        currentVersion: version,
+        ...(sameVersion
+          ? {}
+          : {
+            currentPage: 1,
+            totalPages: 0,
+            activeHighlight: null,
+          }),
+      };
     }),
 
   /** @param {number} page */
