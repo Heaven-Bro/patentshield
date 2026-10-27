@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import WorkspaceLayout from "./WorkspaceLayout";
+import ClaimChartWorkspace from "./ClaimChartWorkspace";
 import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
 import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { useAuthStore } from "../stores/authStore";
@@ -648,6 +649,13 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
         <div className="mt-5 h-[min(78vh,900px)] min-h-[520px]">
           <WorkspaceLayout patents={patents} className="!h-full" />
         </div>
+      )}
+      {activeAnalysisId && ANALYSIS_SUCCESS.has(analysisStatus) && (
+        <ClaimChartWorkspace
+          analysisId={activeAnalysisId}
+          tenantId={tenantId}
+          role={tenant?.role || "READ_ONLY"}
+        />
       )}
       {activeAnalysisId && activeAnalysis && analysisStatus === "FAILED" && (
         <p className="mt-3 text-xs text-slate-500">This run failed. Its persisted results, if any, remain available for review; use Retry analysis to requeue it.</p>

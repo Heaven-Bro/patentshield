@@ -142,7 +142,14 @@ export async function apiRequest(path, options = {}) {
  * @returns {Promise<void>}
  */
 export async function downloadArtifact(path, options = {}) {
-  const headers = { Accept: "application/pdf, application/json" };
+  const headers = {
+    Accept: [
+      "application/pdf",
+      "application/json",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ].join(", "),
+  };
   if (options.tenantId) headers["X-Tenant-ID"] = options.tenantId;
 
   const response = await fetch(apiUrl(path), {
