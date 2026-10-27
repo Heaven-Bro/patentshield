@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 from tenants.models import TenantScopedModel
@@ -22,7 +23,22 @@ class AuditLog(TenantScopedModel):
         default=uuid.uuid4,
         editable=False,
     )
-    actor_user_id = models.UUIDField(null=True, blank=True, db_index=True)
+    actor_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_events",
+    )
+    # Preserves UUID actor identifiers written by the legacy UUIDField schema.
+    # These values are not automatically mapped to users: the previous schema
+    # could not represent the default integer-based Django user primary key.
+    legacy_actor_user_uuid = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        editable=False,
+    )
     action = models.CharField(max_length=100)
     resource_type = models.CharField(max_length=100)
     resource_id = models.UUIDField(null=True, blank=True)

@@ -94,27 +94,17 @@ class AuditLoggingMiddleware:
         return (segments[0] if segments else "unknown")[:100]
 
     @staticmethod
-    def _get_actor_user_id(request: HttpRequest) -> UUID | None:
-        """Return the authenticated user's UUID primary key when available.
+    def _get_actor_user_id(request: HttpRequest) -> Any | None:
+        """Return the authenticated user's native primary key.
 
-        AuditLog.actor_user_id is a UUIDField. For a configured user model with
-        a non-UUID primary key, the event is still recorded but actor_user_id
-        must remain null to respect that field's database type.
+        ``AuditLog.actor_user`` targets ``settings.AUTH_USER_MODEL``. Its raw
+        ``actor_user_id`` attribute therefore accepts the configured user PK
+        type (integer or UUID) without lossy coercion.
         """
         user = getattr(request, "user", None)
         if user is None or not getattr(user, "is_authenticated", False):
             return None
-
-        user_id = getattr(user, "pk", None)
-        if user_id is None:
-            return None
-        if isinstance(user_id, UUID):
-            return user_id
-
-        try:
-            return UUID(str(user_id))
-        except (AttributeError, TypeError, ValueError):
-            return None
+        return getattr(user, "pk", None)
 
     def _write_audit(
         self,
