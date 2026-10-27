@@ -7,7 +7,7 @@ import json
 import logging
 from collections import defaultdict
 from typing import Any
-
+from django.conf import settings
 from asgiref.sync import async_to_sync
 from celery import Task, shared_task
 from channels.layers import get_channel_layer

@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 ARG INSTALL_ML_DEPS=0
-ARG INSTALL_DEV_DEPS=0
+ARG INSTALL_DEV_DEPS=1
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y build-essential libpq-dev \

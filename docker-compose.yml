@@ -39,7 +39,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-1}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -73,7 +73,7 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_ML_DEPS: ${PATENTSHIELD_BUILD_ML_WORKER:-0}
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-1}
     restart: unless-stopped
     env_file: .env
     environment:

@@ -377,12 +377,12 @@ def test_pdf_ingestion_throughput_sla(
     # broker dispatch here, then execute each stage exactly once in-process so
     # the benchmark remains deterministic and cannot race a live worker.
     monkeypatch.setattr(
-        ingestion_tasks.generate_document_embeddings,
+        indexing_tasks.generate_document_embeddings,
         "apply_async",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        ingestion_tasks.extract_and_index_schematics,
+        indexing_tasks.extract_and_index_schematics,
         "apply_async",
         lambda *args, **kwargs: None,
     )

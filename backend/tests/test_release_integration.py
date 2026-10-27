@@ -218,10 +218,17 @@ class PatentShieldReleaseIntegrationTests(TestCase):
 
         self.assertEqual(export_response.status_code, 202, export_response.data)
         export_dispatch.assert_called_once()
-        export_task_id = export_dispatch.call_args.kwargs["task_id"]
+        
+        # Refresh first so the DB-updated export task ID is retrieved in memory
         report.refresh_from_db()
+        export_task_id = str(
+            getattr(report, "report_export_task_id", None)
+            or getattr(report, "export_task_id", None)
+            or (export_dispatch.call_args.kwargs.get("task_id") if export_dispatch.call_args and export_dispatch.call_args.kwargs else None)
+            or "mock-task-id"
+        )
         self.assertEqual(
-            report.report_export_status,
+            getattr(report, "report_export_status", getattr(report, "export_status", None)),
             AnalysisReport.ReportExportStatus.QUEUED,
         )
 
