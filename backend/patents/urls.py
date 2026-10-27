@@ -2,6 +2,8 @@
 
 from django.urls import path
 
+from patents.intelligence_views import LivePatentSearchView
+
 from patents.views import (
     PatentClaimsView,
     PatentDetailView,
@@ -16,6 +18,7 @@ app_name = "patents"
 urlpatterns = [
     path("", PatentListView.as_view(), name="patent-list"),
     path("upload/", PatentDocumentUploadView.as_view(), name="patent-upload"),
+    path("search-live/", LivePatentSearchView.as_view(), name="patent-search-live"),
     path(
         "<uuid:patent_id>/claims/",
         PatentClaimsView.as_view(),

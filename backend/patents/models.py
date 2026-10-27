@@ -186,3 +186,16 @@ class Schematic(TenantScopedModel):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+
+
+# Canonical public patent-source models live in a separate module so public
+# data stays distinct from tenant-owned uploads. Import here for Django model
+# discovery during app loading and migration generation.
+from patents.intelligence_models import (  # noqa: E402
+    ConnectorSyncCursor,
+    PatentFamily,
+    PatentFamilyMember,
+    PatentLegalEvent,
+    PatentPublication,
+    PatentSourceSnapshot,
+)
