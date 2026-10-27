@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 
 from celery import Celery
-from celery.schedules import crontab
 from kombu import Queue
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
@@ -20,6 +19,7 @@ app.conf.update(
         Queue("external_search", routing_key="external_search"),
         Queue("exports", routing_key="exports"),
     ),
+    imports=("reports.claim_chart_tasks",),
     task_routes={
         "ingestion.tasks.*": {"queue": "ingestion"},
         "indexing.tasks.extract_and_index_schematics": {"queue": "ingestion"},
@@ -27,8 +27,8 @@ app.conf.update(
         "ai_engine.tasks.*": {"queue": "analysis"},
         "analyses.tasks.*": {"queue": "analysis"},
         "retrieval.tasks.*": {"queue": "external_search"},
-        "patents.tasks.*": {"queue": "external_search"},
         "reports.tasks.generate_analysis_report": {"queue": "exports"},
+        "reports.claim_chart_tasks.*": {"queue": "exports"},
     },
     task_default_queue="ingestion",
     task_default_routing_key="ingestion",
@@ -44,16 +44,3 @@ app.conf.update(
 )
 
 app.autodiscover_tasks()
-
-
-# A single Celery Beat instance should run per deployment. The sweep only
-# enqueues public-record refreshes; provider requests are rate-limited by the
-# shared Django cache in each connector.
-app.conf.beat_schedule = {
-    "patentshield-refresh-stale-publications": {
-        "task": "patents.tasks.enqueue_stale_publication_refreshes",
-        "schedule": crontab(minute=17, hour="*/2"),
-        "kwargs": {"older_than_hours": 24, "limit": 25},
-        "options": {"queue": "external_search"},
-    },
-}
