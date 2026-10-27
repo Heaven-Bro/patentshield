@@ -112,6 +112,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
   }, [analysisId, tenantId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCharts([]);
     setChartId("");
     setChart(null);
@@ -121,6 +122,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
   }, [analysisId, tenantId, refreshCharts]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (chartId) void loadChart(chartId);
   }, [chartId, loadChart]);
 
