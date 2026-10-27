@@ -422,7 +422,7 @@ def search_and_persist_publications(
     try:
         audit_event = AuditLog.objects.create(
             tenant=tenant,
-            actor_user=actor,
+            actor_user_id=actor.pk,
             action="PATENT_DATA_SEARCH",
             resource_type="PATENT_DATA_SEARCH",
             outcome=AuditLog.Outcome.SUCCESS,

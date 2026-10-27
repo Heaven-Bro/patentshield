@@ -128,6 +128,24 @@ class AnalysisProgressConsumer(AsyncJsonWebsocketConsumer):
             }
         )
 
+    async def claim_chart_export_progress(self, event: dict[str, Any]) -> None:
+        """Forward chart-export progress over the already-authorized analysis group."""
+        await self.send_json(
+            {
+                "type": "claim_chart.export.progress",
+                "data": event.get("data", {}),
+            }
+        )
+
+    async def claim_chart_export_completed(self, event: dict[str, Any]) -> None:
+        """Forward terminal claim-chart export status without closing the socket."""
+        await self.send_json(
+            {
+                "type": "claim_chart.export.completed",
+                "data": event.get("data", {}),
+            }
+        )
+
     @database_sync_to_async
     def _resolve_authorized_tenant(
         self,
