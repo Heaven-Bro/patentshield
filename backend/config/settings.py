@@ -184,16 +184,15 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.getenv("DB_NAME", "patentshield_db"),
-            "USER": os.getenv("DB_USER", "database_user"),
-            "PASSWORD": os.getenv("DB_PASSWORD", "database_password"),
+            "NAME": database_name,
+            "USER": database_user,
+            "PASSWORD": database_password,
             "HOST": os.getenv("DB_HOST", "localhost"),
             "PORT": os.getenv("DB_PORT", "5432"),
             "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
             "CONN_HEALTH_CHECKS": True,
         }
     }
-
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -290,6 +289,26 @@ PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY = os.getenv(
 ).strip()
 USPTO_ODP_API_KEY = os.getenv("USPTO_ODP_API_KEY", "").strip()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+EPO_OPS_CLIENT_ID = os.getenv("EPO_OPS_CLIENT_ID", "").strip()
+EPO_OPS_CLIENT_SECRET = os.getenv("EPO_OPS_CLIENT_SECRET", "").strip()
+PATENTSHIELD_USPTO_API_URL = os.getenv(
+    "PATENTSHIELD_USPTO_API_URL",
+    "https://api.uspto.gov/api/v1/patent/applications/search",
+).strip()
+PATENTSHIELD_EPO_OPS_BASE_URL = os.getenv(
+    "PATENTSHIELD_EPO_OPS_BASE_URL",
+    "https://ops.epo.org/3.2/rest-services",
+).strip()
+PATENTSHIELD_EPO_OPS_TOKEN_URL = os.getenv(
+    "PATENTSHIELD_EPO_OPS_TOKEN_URL",
+    "https://ops.epo.org/3.2/auth/accesstoken",
+).strip()
+PATENTSHIELD_USPTO_MIN_INTERVAL_SECONDS = float(
+    os.getenv("PATENTSHIELD_USPTO_MIN_INTERVAL_SECONDS", "1.0")
+)
+PATENTSHIELD_EPO_MIN_INTERVAL_SECONDS = float(
+    os.getenv("PATENTSHIELD_EPO_MIN_INTERVAL_SECONDS", "6.0")
+)
 PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS = _env_bool(
     "PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS", DEBUG
 )
@@ -302,10 +321,15 @@ if not DEBUG and PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS:
     raise ImproperlyConfigured(
         "Mock embeddings must be disabled when DJANGO_DEBUG=False."
     )
-if PATENTSHIELD_EXTERNAL_SEARCH_ENABLED and not (USPTO_ODP_API_KEY or TAVILY_API_KEY):
+if PATENTSHIELD_EXTERNAL_SEARCH_ENABLED and not (
+    USPTO_ODP_API_KEY
+    or TAVILY_API_KEY
+    or (EPO_OPS_CLIENT_ID and EPO_OPS_CLIENT_SECRET)
+):
     raise ImproperlyConfigured(
-        "External search is enabled, but neither USPTO_ODP_API_KEY nor "
-        "TAVILY_API_KEY is configured."
+        "External search is enabled, but no supported provider credentials are "
+        "configured (USPTO_ODP_API_KEY, TAVILY_API_KEY, or EPO_OPS_CLIENT_ID/"
+        "EPO_OPS_CLIENT_SECRET)."
     )
 if (
     PATENTSHIELD_EXTERNAL_SEARCH_ENABLED
