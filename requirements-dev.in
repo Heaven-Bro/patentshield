@@ -1,0 +1,4 @@
+-r requirements.in
+pytest==9.0.2
+pytest-django==4.11.1
+psutil==7.1.0

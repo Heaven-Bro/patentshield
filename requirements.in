@@ -1,0 +1,21 @@
+# Direct production dependencies. The lock compiler resolves and hashes every
+# transitive dependency into requirements.txt.
+Django==6.0.9
+djangorestframework==3.18.3
+django-cors-headers==4.9.0
+daphne==4.1.2
+channels==4.3.2
+channels-redis==4.3.0
+celery==5.6.3
+redis==6.4.0
+pgvector==0.5.1
+psycopg[binary]==3.3.6
+python-dotenv==1.2.4
+langgraph==1.2.18
+langsmith==0.8.18
+pydantic==2.14.1
+requests==2.34.2
+rank-bm25==0.2.2
+pypdf==6.21.2
+PyMuPDF==1.26.7
+reportlab==4.5.1

@@ -1,0 +1,6 @@
+# Initial opt-in ML manifest. Run scripts/compile_requirements.sh to produce
+# a transitive hash lock before enabling INSTALL_ML_DEPS.
+-r requirements.txt
+sentence-transformers==6.2.0
+transformers==5.21.0
+torch==2.14.1

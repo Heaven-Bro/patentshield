@@ -1,0 +1,6 @@
+# Initial dev manifest. Run scripts/compile_requirements.sh to produce a
+# transitive hash lock before building the release-gate image.
+-r requirements.txt
+pytest==9.0.2
+pytest-django==4.11.1
+psutil==7.1.0

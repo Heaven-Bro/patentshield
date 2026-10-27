@@ -1,9 +1,3 @@
--r requirements.txt
-pytest>=8,<10
-pytest-django>=4.9,<5
-psutil>=5.9,<8
-pydantic>=2.0,<3
-reportlab>=4.0,<5
-rank-bm25>=0.2.2,<1.0
-pypdf>=4.0,<5
-PyMuPDF>=1.23.0,<2.0
+# Compatibility entry point for developers running from the backend folder.
+# The canonical development dependency manifest lives at repository root.
+-r ../requirements-dev.txt

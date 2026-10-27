@@ -1,0 +1,49 @@
+# Secrets and environment-specific configuration
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Python runtimes, bytecode, coverage, and test caches
+.venv/
+.venv-lock/
+venv/
+env/
+**/.venv/
+**/venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Frontend dependencies and generated outputs
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Django generated/static/media and local databases
+backend/staticfiles/
+backend/media/
+staticfiles/
+media/
+*.sqlite3
+*.sqlite3-journal
+
+# Model artifacts, logs, temporary data, and editor files
+ml_model_cache/
+models/
+*.log
+*.tmp
+*.swp
+.DS_Store
+.idea/
+.vscode/

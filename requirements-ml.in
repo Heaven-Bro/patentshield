@@ -1,0 +1,6 @@
+-r requirements.in
+# The real-model worker image is deliberately opt-in because Torch wheels are
+# large and CPU/GPU deployments require platform-specific binary selection.
+sentence-transformers==6.2.0
+transformers==5.21.0
+torch==2.14.1
