@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
-from corsheaders.defaults import default_headers
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = BASE_DIR.parent
@@ -67,26 +66,29 @@ def _database_from_url(database_url: str) -> dict[str, object]:
     return config
 
 
-DEBUG = _env_bool("DJANGO_DEBUG", True)
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
-if not SECRET_KEY:
-    if DEBUG:
-        SECRET_KEY = "dev-only-insecure-secret-do-not-use-in-production"
-    else:
-        raise ImproperlyConfigured(
-            "DJANGO_SECRET_KEY must be provided when DJANGO_DEBUG is false."
-        )
-if not DEBUG and SECRET_KEY.startswith(
-    ("django-insecure-", "replace-this", "replace-with", "dev-only")
+DEBUG = _env_bool("DJANGO_DEBUG", False)
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "").strip()
+_SECRET_PLACEHOLDERS = (
+    "django-insecure-",
+    "replace-this",
+    "replace-with",
+    "change-me",
+    "dev-only",
+    "your-secret",
+)
+if len(SECRET_KEY) < 50 or any(
+    marker in SECRET_KEY.casefold() for marker in _SECRET_PLACEHOLDERS
 ):
     raise ImproperlyConfigured(
-        "A non-placeholder DJANGO_SECRET_KEY is required in production."
+        "DJANGO_SECRET_KEY must be a unique, non-placeholder value of at least "
+        "50 characters. Generate it with Python's secrets.token_urlsafe(64)."
     )
 
-ALLOWED_HOSTS = _env_csv(
-    "ALLOWED_HOSTS",
-    "localhost,127.0.0.1,api",
-)
+ALLOWED_HOSTS = _env_csv("ALLOWED_HOSTS", "")
+if not ALLOWED_HOSTS:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must contain at least one hostname.")
+if not DEBUG and "*" in ALLOWED_HOSTS:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must not contain '*' in production.")
 
 INSTALLED_APPS = [
     "daphne",
@@ -145,22 +147,53 @@ ASGI_APPLICATION = "config.asgi.application"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL:
-    DATABASES = {"default": _database_from_url(DATABASE_URL)}
+    database_config = _database_from_url(DATABASE_URL)
+    if not database_config.get("USER") or not database_config.get("PASSWORD"):
+        raise ImproperlyConfigured(
+            "DATABASE_URL must include an explicit database username and password."
+        )
+    database_password_from_url = str(database_config["PASSWORD"]).casefold()
+    if len(database_password_from_url) < 16 or any(
+        marker in database_password_from_url
+        for marker in ("change-me", "replace-with", "password-here", "example")
+    ):
+        raise ImproperlyConfigured(
+            "DATABASE_URL must use a non-placeholder database password of at least "
+            "16 characters."
+        )
+    DATABASES = {"default": database_config}
 else:
+    database_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "")).strip()
+    database_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "")).strip()
+    database_password = os.getenv(
+        "DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "")
+    )
+    if not database_name or not database_user or not database_password:
+        raise ImproperlyConfigured(
+            "Configure DATABASE_URL or explicitly provide DB_NAME, DB_USER, "
+            "and DB_PASSWORD (or their POSTGRES_* equivalents)."
+        )
+    if len(database_password) < 16 or any(
+        marker in database_password.casefold()
+        for marker in ("change-me", "replace-with", "password-here", "example")
+    ):
+        raise ImproperlyConfigured(
+            "The database password must be a non-placeholder value of at least "
+            "16 characters."
+        )
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "patentshield_db")),
-            "USER": os.getenv("DB_USER", os.getenv("POSTGRES_USER", "patentshield_user")),
-            "PASSWORD": os.getenv(
-                "DB_PASSWORD", os.getenv("POSTGRES_PASSWORD", "BejeGulo")
-            ),
+            "NAME": os.getenv("DB_NAME", "patentshield_db"),
+            "USER": os.getenv("DB_USER", "database_user"),
+            "PASSWORD": os.getenv("DB_PASSWORD", "database_password"),
             "HOST": os.getenv("DB_HOST", "localhost"),
             "PORT": os.getenv("DB_PORT", "5432"),
             "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
             "CONN_HEALTH_CHECKS": True,
         }
     }
+
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -219,6 +252,7 @@ REST_FRAMEWORK = {
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_CACHE_URL = os.getenv("REDIS_CACHE_URL", "redis://localhost:6379/1")
+CHANNELS_REDIS_URL = os.getenv("CHANNELS_REDIS_URL", REDIS_URL)
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "1800"))
@@ -227,7 +261,7 @@ CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1500
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [REDIS_URL]},
+        "CONFIG": {"hosts": [CHANNELS_REDIS_URL]},
     }
 }
 CACHES = {
@@ -253,22 +287,69 @@ PATENTSHIELD_EXTERNAL_SEARCH_ALLOWED_TENANTS = _env_csv(
 )
 PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY = os.getenv(
     "PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY", ""
-)
-USPTO_ODP_API_KEY = os.getenv("USPTO_ODP_API_KEY", "")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+).strip()
+USPTO_ODP_API_KEY = os.getenv("USPTO_ODP_API_KEY", "").strip()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS = _env_bool(
     "PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS", DEBUG
 )
 PATENTSHIELD_MAX_PDF_UPLOAD_BYTES = int(
     os.getenv("PATENTSHIELD_MAX_PDF_UPLOAD_BYTES", str(100 * 1024 * 1024))
 )
+if PATENTSHIELD_MAX_PDF_UPLOAD_BYTES <= 0:
+    raise ImproperlyConfigured("PATENTSHIELD_MAX_PDF_UPLOAD_BYTES must be positive.")
+if not DEBUG and PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS:
+    raise ImproperlyConfigured(
+        "Mock embeddings must be disabled when DJANGO_DEBUG=False."
+    )
+if PATENTSHIELD_EXTERNAL_SEARCH_ENABLED and not (USPTO_ODP_API_KEY or TAVILY_API_KEY):
+    raise ImproperlyConfigured(
+        "External search is enabled, but neither USPTO_ODP_API_KEY nor "
+        "TAVILY_API_KEY is configured."
+    )
+if (
+    PATENTSHIELD_EXTERNAL_SEARCH_ENABLED
+    or PATENTSHIELD_EXTERNAL_SEARCH_ALLOW_QUERY_DISCLOSURE
+):
+    if (
+        len(PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY) < 32
+        or any(
+            marker in PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY.casefold()
+            for marker in _SECRET_PLACEHOLDERS
+        )
+        or PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY == SECRET_KEY
+    ):
+        raise ImproperlyConfigured(
+            "External search requires an independent random "
+            "PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY of at least 32 characters."
+        )
 
-# Production transport and browser-origin protections. TLS termination should
-# be configured at the ingress/reverse proxy; enable SECURE_SSL_REDIRECT there.
+# Production transport and browser-origin protections. TLS termination must be
+# configured at the trusted ingress before enabling SECURE_SSL_REDIRECT.
 if not DEBUG:
+    if not _env_bool("SESSION_COOKIE_SECURE", True):
+        raise ImproperlyConfigured("SESSION_COOKIE_SECURE must be true in production.")
+    if not _env_bool("CSRF_COOKIE_SECURE", True):
+        raise ImproperlyConfigured("CSRF_COOKIE_SECURE must be true in production.")
+    if not _env_bool("SECURE_SSL_REDIRECT", True):
+        raise ImproperlyConfigured("SECURE_SSL_REDIRECT must be true in production.")
+    if any(not origin.startswith("https://") for origin in CORS_ALLOWED_ORIGINS):
+        raise ImproperlyConfigured(
+            "Production CORS_ALLOWED_ORIGINS entries must use HTTPS."
+        )
+    if any(not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS):
+        raise ImproperlyConfigured(
+            "Production CSRF_TRUSTED_ORIGINS entries must use HTTPS."
+        )
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", True)
     CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", True)
+    SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", True)
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool(
+        "SECURE_HSTS_INCLUDE_SUBDOMAINS", False
+    )
+    SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", False)
     SECURE_REFERRER_POLICY = "same-origin"
     X_FRAME_OPTIONS = "DENY"
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
