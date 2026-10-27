@@ -13,28 +13,32 @@ if [[ "${PATENTSHIELD_RUN_REAL_ML_SLA:-0}" == "1" ]]; then
   export PATENTSHIELD_BUILD_ML_WORKER="${PATENTSHIELD_BUILD_ML_WORKER:-1}"
 fi
 
-printf '\n[1/8] Validate Docker Compose configuration\n'
+printf '\n[1/9] Verify pinned/hash-locked dependencies and repository hygiene\n'
+python scripts/verify_dependency_manifest.py --require-hashes
+python scripts/secure_repository_hygiene.py --strict
+
+printf '\n[2/9] Validate Docker Compose configuration\n'
 docker compose config -q
 
-printf '\n[2/8] Build and start PostgreSQL, Redis, API, and worker\n'
+printf '\n[3/9] Build and start PostgreSQL, Redis, API, and worker\n'
 docker compose up -d --build postgres redis api worker
 
-printf '\n[3/8] Apply database migrations\n'
+printf '\n[4/9] Apply database migrations\n'
 docker compose exec -T api python manage.py migrate --noinput
 
-printf '\n[4/8] Django system and migration drift checks\n'
+printf '\n[5/9] Django system and migration drift checks\n'
 docker compose exec -T api python manage.py check
 docker compose exec -T api python manage.py makemigrations --check --dry-run
 
-printf '\n[5/8] Django app regression suites\n'
+printf '\n[6/9] Django app regression suites\n'
 docker compose exec -T api python manage.py test \
-  accounts tenants patents ingestion indexing retrieval ai_engine analyses reports \
+  accounts tenants audit patents ingestion indexing retrieval ai_engine analyses reports \
   --verbosity 1
 
-printf '\n[6/8] Tenant isolation, release integration, retry, and SLA tests\n'
+printf '\n[7/9] Tenant isolation, release integration, retry, and SLA tests\n'
 docker compose exec -T api pytest -q tests
 
-printf '\n[7/8] Frontend lint and production build\n'
+printf '\n[8/9] Frontend lint and production build\n'
 (
   cd frontend
   npm ci
@@ -43,11 +47,11 @@ printf '\n[7/8] Frontend lint and production build\n'
 )
 
 if [[ "${PATENTSHIELD_RUN_REAL_ML_SLA:-0}" == "1" ]]; then
-  printf '\n[8/8] Real cached-model retrieval SLA\n'
+  printf '\n[9/9] Real cached-model retrieval SLA\n'
   docker compose exec -T -e PATENTSHIELD_RUN_REAL_ML_SLA=1 worker \
     pytest -q tests/test_performance_benchmarks.py::test_retrieval_latency_sla
 else
-  printf '\n[8/8] Real-model retrieval SLA skipped (set PATENTSHIELD_RUN_REAL_ML_SLA=1 to enable)\n'
+  printf '\n[9/9] Real-model retrieval SLA skipped (set PATENTSHIELD_RUN_REAL_ML_SLA=1 to enable)\n'
 fi
 
 printf '\nPatentShield release gate passed. Review the remaining manual checks in PHASE_6_README.md.\n'
