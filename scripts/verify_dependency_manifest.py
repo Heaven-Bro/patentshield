@@ -33,6 +33,8 @@ REQUIRED_PACKAGES: dict[str, set[str]] = {
         "pypdf",
         "pymupdf",
         "reportlab",
+        "python-docx",
+        "openpyxl",
     },
     "requirements-dev.txt": {"pytest", "pytest-django", "psutil"},
     "requirements-ml.txt": {"sentence-transformers", "transformers", "torch"},
