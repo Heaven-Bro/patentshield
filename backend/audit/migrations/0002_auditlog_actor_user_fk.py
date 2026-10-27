@@ -18,31 +18,4 @@ class Migration(migrations.Migration):
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
-    operations = [
-        migrations.RenameField(
-            model_name="auditlog",
-            old_name="actor_user_id",
-            new_name="legacy_actor_user_uuid",
-        ),
-        migrations.AlterField(
-            model_name="auditlog",
-            name="legacy_actor_user_uuid",
-            field=models.UUIDField(
-                blank=True,
-                db_index=True,
-                editable=False,
-                null=True,
-            ),
-        ),
-        migrations.AddField(
-            model_name="auditlog",
-            name="actor_user",
-            field=models.ForeignKey(
-                blank=True,
-                null=True,
-                on_delete=django.db.models.deletion.SET_NULL,
-                related_name="audit_events",
-                to=settings.AUTH_USER_MODEL,
-            ),
-        ),
-    ]
+    operations = []
