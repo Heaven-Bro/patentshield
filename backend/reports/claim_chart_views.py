@@ -102,7 +102,7 @@ class ClaimChartAPIView(APIView):
         )
         AuditLog.objects.create(
             tenant_id=tenant_id,
-            actor_user=request.user if request.user.is_authenticated else None,
+            actor_user_id=request.user.pk if request.user.is_authenticated else None,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,

@@ -161,7 +161,7 @@ def generate_claim_chart_export(
             )
             AuditLog.objects.create(
                 tenant_id=locked.tenant_id,
-                actor_user=locked.requested_by,
+                actor_user_id=locked.requested_by.pk,
                 action="CLAIM_CHART_EXPORT_COMPLETED",
                 resource_type="ClaimChartExport",
                 resource_id=locked.pk,
@@ -252,7 +252,7 @@ def generate_claim_chart_export(
                         )
                         AuditLog.objects.create(
                             tenant_id=locked.tenant_id,
-                            actor_user=locked.requested_by,
+                            actor_user_id=locked.requested_by.pk,
                             action=(
                                 "CLAIM_CHART_EXPORT_RETRY_SCHEDULED"
                                 if should_retry

@@ -210,7 +210,7 @@ def record_surveillance_audit(
         safe_metadata.pop(prohibited, None)
     AuditLog.objects.create(
         tenant=tenant,
-        actor_user=actor,
+        actor_user_id=actor.pk,
         action=action[:100],
         resource_type=resource_type[:100],
         resource_id=resource_id,

@@ -98,7 +98,7 @@ def create_chart_from_analysis(
         )
         AuditLog.objects.create(
             tenant_id=tenant_id,
-            actor_user=user,
+            actor_user_id=user.pk,
             action="CLAIM_CHART_CREATED",
             resource_type="ClaimChart",
             resource_id=chart.pk,

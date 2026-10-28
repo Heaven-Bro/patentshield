@@ -102,7 +102,7 @@ def process_office_action(self: Task, office_action_id: str) -> dict[str, object
         counts = parse_office_action(locked)
         AuditLog.objects.create(
             tenant_id=action.tenant_id,
-            actor_user=action.created_by,
+            actor_user_id=action.created_by.pk,
             action="OFFICE_ACTION_DOCUMENT_PROCESSED",
             resource_type="OfficeAction",
             resource_id=action.pk,
@@ -123,7 +123,7 @@ def process_office_action(self: Task, office_action_id: str) -> dict[str, object
             try:
                 AuditLog.objects.create(
                     tenant_id=action.tenant_id,
-                    actor_user=action.created_by,
+                    actor_user_id=action.created_by.pk,
                     action="OFFICE_ACTION_DOCUMENT_PROCESSING_FAILED",
                     resource_type="OfficeAction",
                     resource_id=action.pk,

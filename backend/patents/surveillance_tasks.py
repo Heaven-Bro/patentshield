@@ -463,7 +463,7 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
     attempt = None
     with transaction.atomic():
         delivery = (
-            AlertDelivery.objects.select_for_update()
+            AlertDelivery.objects.select_for_update(of=("self",))
             .select_related(
                 "tenant",
                 "alert",

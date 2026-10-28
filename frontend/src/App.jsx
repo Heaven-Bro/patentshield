@@ -5,6 +5,7 @@ import LoginPage from "./components/LoginPage";
 import PatentsDashboard from "./components/PatentsDashboard";
 import SurveillanceDashboard from "./components/SurveillanceDashboard";
 import OfficeActionAssistant from "./components/OfficeActionAssistant";
+import MultilingualSearch from "./components/MultilingualSearch";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
@@ -276,6 +277,12 @@ export default function App() {
                 aria-pressed={activeSection === "surveillance"}
                 className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "surveillance" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
               >Surveillance</button>
+              <button
+                type="button"
+                onClick={() => setActiveSection("multilingual-search")}
+                aria-pressed={activeSection === "multilingual-search"}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "multilingual-search" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+              >CJK Search</button>
               <div className="flex items-center justify-between gap-3 sm:justify-end">
               <div className="min-w-0 text-right">
                 <p className="max-w-48 truncate text-sm font-semibold text-slate-800">{user?.full_name || user?.username}</p>
@@ -317,6 +324,8 @@ export default function App() {
         <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
       ) : activeSection === "office-actions" ? (
         <OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />
+      ) : activeSection === "multilingual-search" ? (
+        <MultilingualSearch key={activeTenant.id} tenant={activeTenant} />
       ) : (
         <>
           <PatentsDashboard

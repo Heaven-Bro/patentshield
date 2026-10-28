@@ -403,7 +403,7 @@ def create_evidence_grounded_draft(office_action: OfficeAction, user) -> tuple[R
         )
         AuditLog.objects.create(
             tenant_id=office_action.tenant_id,
-            actor_user=user,
+            actor_user_id=user.pk,
             action="OFFICE_ACTION_DRAFT_GENERATED",
             resource_type="ResponseDraft",
             resource_id=draft.pk,
@@ -504,7 +504,7 @@ def create_revision(draft: ResponseDraft, user, content_markdown: str) -> Respon
         current.save(update_fields=("current_revision_number", "status", "updated_at"))
         AuditLog.objects.create(
             tenant_id=current.tenant_id,
-            actor_user=user,
+            actor_user_id=user.pk,
             action="OFFICE_ACTION_DRAFT_REVISION_CREATED",
             resource_type="ResponseDraftRevision",
             resource_id=revision.pk,
@@ -536,7 +536,7 @@ def record_review(revision: ResponseDraftRevision, user, decision: str, comments
         draft.save(update_fields=("status", "updated_at"))
         AuditLog.objects.create(
             tenant_id=revision.tenant_id,
-            actor_user=user,
+            actor_user_id=user.pk,
             action="OFFICE_ACTION_DRAFT_REVIEWED",
             resource_type="OfficeActionReview",
             resource_id=review.pk,

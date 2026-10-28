@@ -92,7 +92,7 @@ def _enqueue_office_action(office_action: OfficeAction, actor) -> str | None:
         try:
             AuditLog.objects.create(
                 tenant_id=office_action.tenant_id,
-                actor_user=actor,
+                actor_user_id=actor.pk,
                 action="OFFICE_ACTION_PROCESS_ENQUEUE_FAILED",
                 resource_type="OfficeAction",
                 resource_id=office_action.pk,
@@ -217,7 +217,7 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
                 )
                 AuditLog.objects.create(
                     tenant=tenant,
-                    actor_user=request.user,
+                    actor_user_id=request.user.pk,
                     action="OFFICE_ACTION_UPLOADED",
                     resource_type="OfficeAction",
                     resource_id=office_action.pk,
@@ -309,7 +309,7 @@ class ResponseDraftSubmitForReviewView(TenantOfficeActionAPIView):
         draft.save(update_fields=("status", "updated_at"))
         AuditLog.objects.create(
             tenant_id=draft.tenant_id,
-            actor_user=request.user,
+            actor_user_id=request.user.pk,
             action="OFFICE_ACTION_DRAFT_SUBMITTED_FOR_REVIEW",
             resource_type="ResponseDraft",
             resource_id=draft.pk,
@@ -374,7 +374,7 @@ class AmendmentSupportView(TenantOfficeActionAPIView):
         support_check = check_amendment_support(action, serializer.validated_data["claim_number"], serializer.validated_data["proposed_claim_text"], request.user)
         AuditLog.objects.create(
             tenant_id=action.tenant_id,
-            actor_user=request.user,
+            actor_user_id=request.user.pk,
             action="OFFICE_ACTION_AMENDMENT_SUPPORT_CHECKED",
             resource_type="AmendmentSupportCheck",
             resource_id=support_check.pk,

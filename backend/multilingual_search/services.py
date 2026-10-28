@@ -229,7 +229,7 @@ def record_translation_audit(
     """Write operational metadata without putting source or translated text in logs."""
     AuditLog.objects.create(
         tenant=tenant,
-        actor_user=actor,
+        actor_user_id=actor.pk,
         action="MULTILINGUAL_TRANSLATION_REQUESTED",
         resource_type="TextChunk",
         resource_id=chunk.pk,

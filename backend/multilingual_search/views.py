@@ -64,7 +64,7 @@ def _audit_search(
     try:
         AuditLog.objects.create(
             tenant=tenant,
-            actor_user=actor,
+            actor_user_id=actor.pk,
             action="MULTILINGUAL_PATENT_SEARCH",
             resource_type="MultilingualSearchQuery",
             outcome=AuditLog.Outcome.SUCCESS,
