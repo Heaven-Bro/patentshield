@@ -4,6 +4,7 @@ import AnalysisConsole from "./components/AnalysisConsole";
 import LoginPage from "./components/LoginPage";
 import PatentsDashboard from "./components/PatentsDashboard";
 import SurveillanceDashboard from "./components/SurveillanceDashboard";
+import OfficeActionAssistant from "./components/OfficeActionAssistant";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
@@ -265,6 +266,12 @@ export default function App() {
               >Workspace</button>
               <button
                 type="button"
+                onClick={() => setActiveSection("office-actions")}
+                aria-pressed={activeSection === "office-actions"}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "office-actions" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+              >Prosecution</button>
+              <button
+                type="button"
                 onClick={() => setActiveSection("surveillance")}
                 aria-pressed={activeSection === "surveillance"}
                 className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "surveillance" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
@@ -308,6 +315,8 @@ export default function App() {
         </main>
       ) : activeSection === "surveillance" ? (
         <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
+      ) : activeSection === "office-actions" ? (
+        <OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />
       ) : (
         <>
           <PatentsDashboard
