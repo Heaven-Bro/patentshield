@@ -34,6 +34,23 @@ def _env_csv(name: str, default: str = "") -> list[str]:
     return [part.strip() for part in values if part.strip()]
 
 
+# Phase 9 air-gapped mode disables Hugging Face Hub/Transformers network access
+# before any model library is imported. Kubernetes NetworkPolicy remains the
+# actual egress boundary; these flags are defense in depth.
+PATENTSHIELD_OFFLINE_MODE = _env_bool("PATENTSHIELD_OFFLINE_MODE", False)
+if PATENTSHIELD_OFFLINE_MODE:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["DO_NOT_TRACK"] = "1"
+    # These legacy task gates read directly from os.environ, so override them
+    # too rather than relying only on settings constants later in this module.
+    os.environ["PATENTSHIELD_EXTERNAL_SEARCH_ENABLED"] = "false"
+    os.environ["PATENTSHIELD_TRANSLATION_ENABLED"] = "false"
+    os.environ["PATENTSHIELD_SURVEILLANCE_ENABLED"] = "false"
+    os.environ["PATENTSHIELD_CONNECTOR_SYNC_ENABLED"] = "false"
+
+
 def _database_from_url(database_url: str) -> dict[str, object]:
     """Parse a PostgreSQL DATABASE_URL without requiring another package."""
     parsed = urlsplit(database_url)
@@ -222,6 +239,98 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 
+# Model paths are ordinary local files in air-gapped deployments. The existing
+# inference wrappers already use local_files_only=True, so a path override keeps
+# model loading local without changing embedding dimensions or semantics.
+BGE_MODEL_NAME = (
+    os.getenv("PATENTSHIELD_BGE_MODEL_PATH", "").strip()
+    or os.getenv("BGE_MODEL_NAME", "BAAI/bge-m3").strip()
+    or "BAAI/bge-m3"
+)
+PATENTSHIELD_RERANKER_MODEL_NAME = (
+    os.getenv("PATENTSHIELD_RERANKER_MODEL_PATH", "").strip()
+    or os.getenv("PATENTSHIELD_RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3").strip()
+    or "BAAI/bge-reranker-v2-m3"
+)
+
+# Private object storage is optional. The filesystem backend remains the default
+# for existing deployments; production object-storage mode requires explicit
+# server-side encryption using a customer-managed KMS key.
+PATENTSHIELD_STORAGE_BACKEND = os.getenv(
+    "PATENTSHIELD_STORAGE_BACKEND", "filesystem"
+).strip().casefold()
+if PATENTSHIELD_STORAGE_BACKEND not in {"filesystem", "s3"}:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_STORAGE_BACKEND must be either 'filesystem' or 's3'."
+    )
+if PATENTSHIELD_STORAGE_BACKEND == "s3":
+    _storage_bucket = os.getenv("AWS_STORAGE_BUCKET_NAME", "").strip()
+    _storage_endpoint = os.getenv("AWS_S3_ENDPOINT_URL", "").strip().rstrip("/")
+    _storage_region = os.getenv("AWS_S3_REGION_NAME", "").strip()
+    _storage_sse = os.getenv("PATENTSHIELD_OBJECT_STORAGE_SSE", "aws:kms").strip()
+    _storage_kms_key_id = os.getenv(
+        "PATENTSHIELD_OBJECT_STORAGE_KMS_KEY_ID", ""
+    ).strip()
+    _storage_verify = os.getenv("AWS_S3_VERIFY", "true").strip()
+    _storage_url = urlsplit(_storage_endpoint)
+    if not _storage_bucket or not _storage_endpoint or not _storage_region:
+        raise ImproperlyConfigured(
+            "S3 storage requires AWS_STORAGE_BUCKET_NAME, AWS_S3_ENDPOINT_URL, "
+            "and AWS_S3_REGION_NAME. Point the endpoint at private object storage."
+        )
+    if (
+        _storage_url.scheme not in {"https", "http"}
+        or not _storage_url.hostname
+        or _storage_url.username
+        or _storage_url.password
+        or _storage_url.query
+        or _storage_url.fragment
+    ):
+        raise ImproperlyConfigured(
+            "AWS_S3_ENDPOINT_URL must be a base HTTP(S) URL without credentials, "
+            "query, or fragment."
+        )
+    if not DEBUG and _storage_url.scheme != "https":
+        raise ImproperlyConfigured(
+            "Private object storage must use HTTPS in non-debug deployments."
+        )
+    if _storage_sse != "aws:kms" or not _storage_kms_key_id:
+        raise ImproperlyConfigured(
+            "S3 object storage requires PATENTSHIELD_OBJECT_STORAGE_SSE=aws:kms "
+            "and a customer-managed PATENTSHIELD_OBJECT_STORAGE_KMS_KEY_ID. "
+            "Use an encrypted filesystem/PVC instead if your isolated object-store "
+            "implementation does not expose this S3 encryption contract."
+        )
+    if _storage_verify.casefold() in {"0", "false", "no", "off"} and not DEBUG:
+        raise ImproperlyConfigured(
+            "AWS_S3_VERIFY cannot disable TLS certificate verification in production."
+        )
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "bucket_name": _storage_bucket,
+                "endpoint_url": _storage_endpoint,
+                "region_name": _storage_region,
+                "addressing_style": os.getenv("AWS_S3_ADDRESSING_STYLE", "path").strip(),
+                "verify": (
+                    False if _storage_verify.casefold() in {"0", "false", "no", "off"}
+                    else (_storage_verify if _storage_verify.casefold() not in {"1", "true", "yes", "on"} else True)
+                ),
+                "default_acl": None,
+                "querystring_auth": True,
+                "file_overwrite": False,
+                "object_parameters": {
+                    "ServerSideEncryption": "aws:kms",
+                    "SSEKMSKeyId": _storage_kms_key_id,
+                },
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+        },
+    }
+
 FRONTEND_ORIGINS = _env_csv(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
@@ -280,11 +389,11 @@ CACHES = {
 
 PATENTSHIELD_EXTERNAL_SEARCH_ENABLED = _env_bool(
     "PATENTSHIELD_EXTERNAL_SEARCH_ENABLED", False
-)
+) and not PATENTSHIELD_OFFLINE_MODE
 # Phase 3 surveillance is opt-in and reuses the existing external-search policy.
 PATENTSHIELD_SURVEILLANCE_ENABLED = _env_bool(
     "PATENTSHIELD_SURVEILLANCE_ENABLED", False
-)
+) and not PATENTSHIELD_OFFLINE_MODE
 PATENTSHIELD_SURVEILLANCE_ENCRYPTION_KEY = os.getenv(
     "PATENTSHIELD_SURVEILLANCE_ENCRYPTION_KEY", ""
 ).strip()
@@ -347,7 +456,7 @@ PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS = _env_bool(
 # disabled until a provider endpoint and per-tenant allowlist are configured.
 PATENTSHIELD_TRANSLATION_ENABLED = _env_bool(
     "PATENTSHIELD_TRANSLATION_ENABLED", False
-)
+) and not PATENTSHIELD_OFFLINE_MODE
 PATENTSHIELD_TRANSLATION_URL = os.getenv(
     "PATENTSHIELD_TRANSLATION_URL", ""
 ).strip().rstrip("/")
