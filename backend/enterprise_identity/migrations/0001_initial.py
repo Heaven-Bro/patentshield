@@ -1,0 +1,149 @@
+# Generated for PatentShield Phase 8 — Enterprise Deployment and Identity.
+import django.db.models.deletion
+import django.db.models.constraints
+import uuid
+from django.conf import settings
+from django.db import migrations, models
+from django.db.models import Q
+
+
+class Migration(migrations.Migration):
+    initial = True
+
+    dependencies = [
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ("tenants", "0001_initial"),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name="IdentityProvider",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_identityprovider_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("slug", models.SlugField(max_length=80)),
+                ("name", models.CharField(max_length=160)),
+                ("protocol", models.CharField(choices=[("OIDC", "OpenID Connect"), ("SAML", "SAML 2.0")], max_length=4)),
+                ("enabled", models.BooleanField(db_index=True, default=False)),
+                ("jit_provisioning", models.BooleanField(default=False)),
+                ("allow_existing_email_link", models.BooleanField(default=False)),
+                ("trust_email_from_idp", models.BooleanField(default=False)),
+                ("default_role", models.CharField(choices=[("OWNER", "Owner"), ("ADMIN", "Admin"), ("ATTORNEY", "Attorney"), ("ANALYST", "Analyst"), ("REVIEWER", "Reviewer"), ("READ_ONLY", "Read only")], default="READ_ONLY", max_length=9)),
+                ("allowed_email_domains", models.JSONField(blank=True, default=list)),
+                ("group_claim", models.CharField(default="groups", max_length=120)),
+                ("group_role_mapping", models.JSONField(blank=True, default=dict)),
+                ("issuer", models.URLField(blank=True, max_length=500)),
+                ("discovery_url", models.URLField(blank=True, max_length=500)),
+                ("client_id", models.CharField(blank=True, max_length=300)),
+                ("client_secret_ciphertext", models.TextField(blank=True, editable=False)),
+                ("client_auth_method", models.CharField(choices=[("client_secret_basic", "Client secret (HTTP Basic)"), ("client_secret_post", "Client secret (POST body)")], default="client_secret_basic", max_length=32)),
+                ("scopes", models.JSONField(blank=True, default=list)),
+                ("sp_entity_id", models.URLField(blank=True, max_length=500)),
+                ("idp_entity_id", models.CharField(blank=True, max_length=500)),
+                ("sso_url", models.URLField(blank=True, max_length=500)),
+                ("idp_x509_certificate", models.TextField(blank=True)),
+                ("saml_email_attribute", models.CharField(default="email", max_length=250)),
+                ("saml_groups_attribute", models.CharField(default="groups", max_length=250)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("created_by", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="identity_providers_created", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("name",)},
+        ),
+        migrations.CreateModel(
+            name="SCIMToken",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_scimtoken_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("label", models.CharField(max_length=120)),
+                ("token_hash", models.CharField(editable=False, max_length=64, unique=True)),
+                ("scopes", models.JSONField(blank=True, default=list)),
+                ("expires_at", models.DateTimeField(blank=True, null=True)),
+                ("last_used_at", models.DateTimeField(blank=True, null=True)),
+                ("revoked_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("created_by", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="scim_tokens_created", to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name="MatterPolicy",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_matterpolicy_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("matter_type", models.CharField(max_length=40)),
+                ("matter_id", models.UUIDField()),
+                ("enforce_acl", models.BooleanField(default=False)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("created_by", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="matter_policies_created", to=settings.AUTH_USER_MODEL)),
+                ("updated_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="matter_policies_updated", to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name="ManagedSession",
+            fields=[
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("session_key_hash", models.CharField(editable=False, max_length=64, unique=True)),
+                ("auth_source", models.CharField(default="PASSWORD", max_length=24)),
+                ("user_agent", models.CharField(blank=True, max_length=300)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("last_seen_at", models.DateTimeField(auto_now=True)),
+                ("revoked_at", models.DateTimeField(blank=True, null=True)),
+                ("revoked_by", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="managed_sessions_revoked", to=settings.AUTH_USER_MODEL)),
+                ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="managed_sessions", to=settings.AUTH_USER_MODEL)),
+            ],
+            options={"ordering": ("-last_seen_at",)},
+        ),
+        migrations.CreateModel(
+            name="FederatedIdentity",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_federatedidentity_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("subject_id", models.CharField(max_length=512)),
+                ("email_verified", models.BooleanField(default=False)),
+                ("groups", models.JSONField(blank=True, default=list)),
+                ("last_login_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("provider", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="identities", to="enterprise_identity.identityprovider")),
+                ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="federated_identities", to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name="MatterGrant",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_mattergrant_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("matter_type", models.CharField(max_length=40)),
+                ("matter_id", models.UUIDField()),
+                ("subject_role", models.CharField(blank=True, choices=[("OWNER", "Owner"), ("ADMIN", "Admin"), ("ATTORNEY", "Attorney"), ("ANALYST", "Analyst"), ("REVIEWER", "Reviewer"), ("READ_ONLY", "Read only")], max_length=9, null=True)),
+                ("level", models.CharField(choices=[("READ", "Read"), ("EDIT", "Edit"), ("REVIEW", "Review"), ("ADMIN", "Administer access")], max_length=6)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("created_by", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="matter_grants_created", to=settings.AUTH_USER_MODEL)),
+                ("subject_user", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name="matter_grants", to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.CreateModel(
+            name="SCIMUserBinding",
+            fields=[
+                ("tenant", models.ForeignKey(db_index=True, on_delete=django.db.models.deletion.CASCADE, related_name="enterprise_identity_scimuserbinding_records", to="tenants.tenant")),
+                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ("external_id", models.CharField(max_length=255)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="scim_bindings", to=settings.AUTH_USER_MODEL)),
+            ],
+        ),
+        migrations.AddConstraint(model_name="identityprovider", constraint=models.UniqueConstraint(fields=("tenant", "slug"), name="entidp_tenant_slug_uniq")),
+        migrations.AddIndex(model_name="identityprovider", index=models.Index(fields=["tenant", "protocol", "enabled"], name="entidp_tenant_protocol_idx")),
+        migrations.AddConstraint(model_name="scimuserbinding", constraint=models.UniqueConstraint(fields=("tenant", "external_id"), name="scim_tenant_externalid_uniq")),
+        migrations.AddConstraint(model_name="scimuserbinding", constraint=models.UniqueConstraint(fields=("tenant", "user"), name="scim_tenant_user_uniq")),
+        migrations.AddIndex(model_name="managedsession", index=models.Index(fields=["user", "revoked_at", "last_seen_at"], name="managed_session_user_idx")),
+        migrations.AddConstraint(model_name="federatedidentity", constraint=models.UniqueConstraint(fields=("provider", "subject_id"), name="fedid_provider_subject_uniq")),
+        migrations.AddIndex(model_name="federatedidentity", index=models.Index(fields=["tenant", "user"], name="fedid_tenant_user_idx")),
+        migrations.AddConstraint(model_name="matterpolicy", constraint=models.UniqueConstraint(fields=("tenant", "matter_type", "matter_id"), name="matter_policy_target_uniq")),
+        migrations.AddIndex(model_name="matterpolicy", index=models.Index(fields=["tenant", "matter_type", "matter_id"], name="matter_policy_lookup_idx")),
+        migrations.AddConstraint(model_name="mattergrant", constraint=models.CheckConstraint(condition=(Q(subject_user__isnull=False, subject_role__isnull=True) | Q(subject_user__isnull=True, subject_role__isnull=False)), name="matter_grant_one_subject_ck")),
+        migrations.AddConstraint(model_name="mattergrant", constraint=models.UniqueConstraint(fields=("tenant", "matter_type", "matter_id", "subject_user"), condition=Q(subject_user__isnull=False), name="matter_grant_user_uniq")),
+        migrations.AddConstraint(model_name="mattergrant", constraint=models.UniqueConstraint(fields=("tenant", "matter_type", "matter_id", "subject_role"), condition=Q(subject_role__isnull=False), name="matter_grant_role_uniq")),
+        migrations.AddIndex(model_name="mattergrant", index=models.Index(fields=["tenant", "matter_type", "matter_id", "level"], name="matter_grant_target_idx")),
+    ]
