@@ -199,3 +199,17 @@ from patents.intelligence_models import (  # noqa: E402
     PatentPublication,
     PatentSourceSnapshot,
 )
+
+# Tenant-owned surveillance state is registered alongside canonical patent
+# intelligence models, while public patent/family/legal-event rows remain global.
+from patents.surveillance_models import (  # noqa: E402,F401
+    AlertDelivery,
+    AlertDeliveryAttempt,
+    AlertDestination,
+    AlertSubscription,
+    SurveillanceAlert,
+    SurveillanceWatchRule,
+    SurveillanceWatchlist,
+    WatchlistObservation,
+    WatchlistObservedLegalEvent,
+)

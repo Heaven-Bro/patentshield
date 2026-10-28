@@ -108,3 +108,91 @@ class ConnectorSyncCursorAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+# Phase 3 operational views intentionally omit encrypted webhook ciphertext and
+# keep generated alert/provenance history read-only in Django admin.
+from patents.surveillance_models import (  # noqa: E402
+    AlertDelivery,
+    AlertDeliveryAttempt,
+    AlertDestination,
+    AlertSubscription,
+    SurveillanceAlert,
+    SurveillanceWatchRule,
+    SurveillanceWatchlist,
+    WatchlistObservation,
+    WatchlistObservedLegalEvent,
+)
+
+
+class SurveillanceReadOnlyAdmin(admin.ModelAdmin):
+    readonly_fields = ()
+
+    def get_readonly_fields(self, request, obj=None):
+        return tuple(field.name for field in self.model._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return bool(obj is not None and super().has_view_permission(request, obj))
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SurveillanceWatchlist)
+class SurveillanceWatchlistAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("name", "tenant", "is_active", "poll_status", "last_polled_at", "next_poll_at")
+    list_filter = ("is_active", "poll_status")
+    search_fields = ("name", "tenant__name")
+
+
+@admin.register(SurveillanceWatchRule)
+class SurveillanceWatchRuleAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("watchlist", "tenant", "rule_type", "value", "is_active")
+    list_filter = ("rule_type", "is_active")
+    search_fields = ("watchlist__name", "value")
+
+
+@admin.register(WatchlistObservation)
+class WatchlistObservationAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("watchlist", "rule", "publication", "last_status", "last_observed_at")
+    search_fields = ("watchlist__name", "publication__publication_number", "rule__value")
+
+
+@admin.register(WatchlistObservedLegalEvent)
+class WatchlistObservedLegalEventAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("observation", "legal_event", "first_observed_at")
+
+
+@admin.register(AlertDestination)
+class AlertDestinationAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("name", "tenant", "channel", "is_active", "created_at")
+    list_filter = ("channel", "is_active")
+    search_fields = ("name", "tenant__name", "email_address")
+    exclude = ("webhook_secret_ciphertext",)
+
+
+@admin.register(AlertSubscription)
+class AlertSubscriptionAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("watchlist", "destination", "tenant", "is_active")
+    list_filter = ("is_active",)
+
+
+@admin.register(SurveillanceAlert)
+class SurveillanceAlertAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("title", "tenant", "watchlist", "alert_type", "state", "created_at")
+    list_filter = ("alert_type", "state")
+    search_fields = ("title", "watchlist__name", "publication__publication_number")
+
+
+@admin.register(AlertDelivery)
+class AlertDeliveryAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("alert", "destination", "tenant", "status", "attempt_count", "last_http_status")
+    list_filter = ("status",)
+
+
+@admin.register(AlertDeliveryAttempt)
+class AlertDeliveryAttemptAdmin(SurveillanceReadOnlyAdmin):
+    list_display = ("delivery", "tenant", "attempt_number", "outcome", "response_status", "started_at")
+    list_filter = ("outcome",)
