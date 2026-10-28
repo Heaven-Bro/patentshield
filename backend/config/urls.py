@@ -15,6 +15,7 @@ urlpatterns = [
     # analyses.urls declares paths prefixed with "analyses/" internally.
     path("api/v1/", include("analyses.urls")),
     path("api/v1/reports/", include("reports.urls")),
+    path("api/v1/office-actions/", include("office_actions.urls")),
 ]
 
 if settings.DEBUG:

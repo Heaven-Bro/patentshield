@@ -19,7 +19,7 @@ app.conf.update(
         Queue("external_search", routing_key="external_search"),
         Queue("exports", routing_key="exports"),
     ),
-    imports=("reports.claim_chart_tasks", "patents.surveillance_tasks"),
+    imports=("reports.claim_chart_tasks", "patents.surveillance_tasks", "office_actions.tasks"),
     task_routes={
         "ingestion.tasks.*": {"queue": "ingestion"},
         "indexing.tasks.extract_and_index_schematics": {"queue": "ingestion"},
@@ -30,6 +30,7 @@ app.conf.update(
         "reports.tasks.generate_analysis_report": {"queue": "exports"},
         "reports.claim_chart_tasks.*": {"queue": "exports"},
         "patents.surveillance_tasks.*": {"queue": "external_search"},
+        "office_actions.tasks.*": {"queue": "analysis"},
     },
     task_default_queue="ingestion",
     task_default_routing_key="ingestion",

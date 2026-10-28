@@ -113,6 +113,7 @@ INSTALLED_APPS = [
     "ai_engine",
     "analyses",
     "reports",
+    "office_actions.apps.OfficeActionsConfig",
 ]
 
 MIDDLEWARE = [
