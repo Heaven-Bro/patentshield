@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 
 from analyses.models import AnalysisReport, ClaimAssessment, EvidenceReference
 from analyses.tasks import run_patent_analysis
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from audit.models import AuditLog
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import TenantMembership
@@ -82,8 +83,11 @@ class AnalysisListCreateView(APIView):
                 target_document_version__patent_id=F("patent_id"),
             )
             .select_related("patent", "target_document_version", "target_claim")
-            .order_by("-created_at")[:limit]
+            .order_by("-created_at")
         )
+        analyses = filter_visible_matter_queryset(analyses, tenant=tenant, user=request.user, matter_type="analysis")
+        analyses = filter_visible_matter_queryset(analyses, tenant=tenant, user=request.user, matter_type="patent", id_field="patent_id")
+        analyses = analyses[:limit]
         return Response({"results": [_serialize_analysis(item) for item in analyses]})
 
     def post(self, request: Request) -> Response:
@@ -124,6 +128,7 @@ class AnalysisListCreateView(APIView):
                 "The selected patent, version, or claim was not found."
             ) from exc
 
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="EDIT")
         if (
             patent.tenant_id != tenant.pk
             or version.tenant_id != tenant.pk
@@ -269,6 +274,8 @@ class AnalysisRetryView(APIView):
                     or analysis.target_document_version.patent_id != analysis.patent_id
                 ):
                     raise NotFound("Analysis was not found.")
+                require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="EDIT")
+                require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="EDIT")
                 if analysis.status != AnalysisReport.Status.FAILED:
                     return Response(
                         {
@@ -415,6 +422,8 @@ class AnalysisReviewView(APIView):
             raise PermissionDenied(
                 "Analysis provenance does not match tenant context."
             )
+        require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="REVIEW")
+        require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="READ")
 
         try:
             with transaction.atomic():
@@ -526,6 +535,9 @@ class AnalysisDetailView(APIView):
                 .first()
             )
         )
+        require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="READ")
+
         if claim is not None and (
             claim.tenant_id != tenant.pk
             or claim.patent_id != analysis.patent_id
