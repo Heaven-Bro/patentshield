@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import AnalysisConsole from "./components/AnalysisConsole";
 import LoginPage from "./components/LoginPage";
 import PatentsDashboard from "./components/PatentsDashboard";
+import SurveillanceDashboard from "./components/SurveillanceDashboard";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
@@ -33,6 +34,7 @@ export default function App() {
   const [patentsLoading, setPatentsLoading] = useState(false);
   const [patentsError, setPatentsError] = useState("");
   const [refreshCounter, setRefreshCounter] = useState(0);
+  const [activeSection, setActiveSection] = useState("workspace");
 
   const activeTenant = useMemo(
     () => tenants.find((tenant) => tenant.id === activeTenantId) || null,
@@ -156,6 +158,7 @@ export default function App() {
     setPatents([]);
     setPatentsError("");
     setPatentsLoading(false);
+    setActiveSection("workspace");
     resetWorkspaceState();
     setActiveTenant(tenantId);
   }
@@ -253,7 +256,20 @@ export default function App() {
               onChange={handleTenantChange}
               disabled={logoutBusy}
             />
-            <div className="flex items-center justify-between gap-3 sm:justify-end">
+            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setActiveSection("workspace")}
+                aria-pressed={activeSection === "workspace"}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "workspace" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+              >Workspace</button>
+              <button
+                type="button"
+                onClick={() => setActiveSection("surveillance")}
+                aria-pressed={activeSection === "surveillance"}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "surveillance" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+              >Surveillance</button>
+              <div className="flex items-center justify-between gap-3 sm:justify-end">
               <div className="min-w-0 text-right">
                 <p className="max-w-48 truncate text-sm font-semibold text-slate-800">{user?.full_name || user?.username}</p>
                 <p className="max-w-48 truncate text-xs text-slate-500">{user?.email || user?.username}</p>
@@ -266,6 +282,7 @@ export default function App() {
               >
                 {logoutBusy ? "Signing out…" : "Sign out"}
               </button>
+              </div>
             </div>
           </div>
         </div>
@@ -289,6 +306,8 @@ export default function App() {
             </div>
           </div>
         </main>
+      ) : activeSection === "surveillance" ? (
+        <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
       ) : (
         <>
           <PatentsDashboard
