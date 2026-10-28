@@ -134,6 +134,7 @@ INSTALLED_APPS = [
     "multilingual_search.apps.MultilingualSearchConfig",
     "fto.apps.FTOConfig",
     "landscapes.apps.LandscapesConfig",
+    "portfolio_valuation.apps.PortfolioValuationConfig",
     "enterprise_identity.apps.EnterpriseIdentityConfig",
 ]
 
