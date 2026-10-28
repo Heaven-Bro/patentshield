@@ -23,3 +23,7 @@ models
 .DS_Store
 .idea
 .vscode
+# Phase 9 offline transfer bundles and operator-generated model manifests
+offline/
+patentshield-offline-release/
+backups/

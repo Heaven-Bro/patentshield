@@ -1,0 +1,31 @@
+# Example for clusters using Kyverno. Replace the repository glob and the PEM
+# block with customer-controlled values, validate against the installed Kyverno
+# CRDs, and apply through change control. Do not apply this placeholder as-is.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-patentshield-release-signatures
+spec:
+  background: false
+  validationFailureAction: Enforce
+  rules:
+    - name: require-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - patentshield
+      verifyImages:
+        - imageReferences:
+            - "registry.internal.example/patentshield*"
+          required: true
+          verifyDigest: true
+          mutateDigest: false
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+                      REPLACE_WITH_CUSTOMER_COSIGN_PUBLIC_KEY_PEM

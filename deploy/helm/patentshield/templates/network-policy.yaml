@@ -1,0 +1,108 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: patentshield
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-required-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: patentshield
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: NotIn
+        values: [model-installer]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- if .Values.networkPolicy.databaseNamespaceSelector }}
+              {{- toYaml .Values.networkPolicy.databaseNamespaceSelector | nindent 14 }}
+              {{- else }}
+              kubernetes.io/metadata.name: {{ $.Release.Namespace | quote }}
+              {{- end }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.databasePodSelector | nindent 14 }}
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- if .Values.networkPolicy.redisNamespaceSelector }}
+              {{- toYaml .Values.networkPolicy.redisNamespaceSelector | nindent 14 }}
+              {{- else }}
+              kubernetes.io/metadata.name: {{ $.Release.Namespace | quote }}
+              {{- end }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.redisPodSelector | nindent 14 }}
+      ports: [{ protocol: TCP, port: 6379 }]
+    {{- if .Values.networkPolicy.objectStoragePodSelector }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- if .Values.networkPolicy.objectStorageNamespaceSelector }}
+              {{- toYaml .Values.networkPolicy.objectStorageNamespaceSelector | nindent 14 }}
+              {{- else }}
+              kubernetes.io/metadata.name: {{ $.Release.Namespace | quote }}
+              {{- end }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.objectStoragePodSelector | nindent 14 }}
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- range .Values.networkPolicy.additionalEgressCIDRs }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr | quote }}
+      ports:
+        {{- range .ports }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-ingress-to-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: patentshield
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerPodSelector | nindent 14 }}
+      ports: [{ protocol: TCP, port: 8000 }]
+{{- end }}

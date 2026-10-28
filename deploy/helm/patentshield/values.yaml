@@ -1,0 +1,86 @@
+# Values for a private installation. Set image.digest to the digest of the
+# signed release image; a tag is deliberately not accepted by the templates.
+image:
+  repository: registry.example.invalid/patentshield
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+runtimeSecret: patentshield-runtime
+
+replicas:
+  api: 2
+  worker: 2
+  beat: 1
+
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  host: patentshield.example.invalid
+  tlsSecretName: patentshield-ingress-tls
+
+storage:
+  # Use s3 for a private S3-compatible object store configured with SSE-KMS.
+  # Use filesystem only when MEDIA_ROOT is backed by a customer-encrypted PVC.
+  backend: s3
+  filesystemClaim: patentshield-media
+
+modelBundle:
+  # Provision these claims out-of-band; the bundle PVC contains manifest.json
+  # and models/{bge-m3,reranker}. The model PVC is mounted read-only by apps.
+  bundleClaim: patentshield-model-bundle
+  modelClaim: patentshield-models
+  installJob:
+    enabled: false
+    name: patentshield-model-bundle-install
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+  ingressControllerPodSelector:
+    app.kubernetes.io/name: ingress-nginx
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+  # Selectors for in-cluster PostgreSQL/Redis. If using external services, add
+  # their private CIDRs below, or provision equivalent reviewed NetworkPolicies.
+  databaseNamespaceSelector: {}
+  databasePodSelector:
+    app.kubernetes.io/name: postgresql
+  redisNamespaceSelector: {}
+  redisPodSelector:
+    app.kubernetes.io/name: redis
+  objectStorageNamespaceSelector: {}
+  objectStoragePodSelector: {}
+  additionalEgressCIDRs: []
+  # Example:
+  # additionalEgressCIDRs:
+  #   - cidr: 10.44.10.0/24
+  #     ports: [443]
+
+resources:
+  api:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: "2", memory: 4Gi }
+  worker:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "4", memory: 8Gi }
+  beat:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
+
+persistence:
+  createMediaPVC: false
+  mediaSize: 100Gi
+  mediaStorageClass: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

@@ -1,0 +1,45 @@
+{{- if .Values.modelBundle.installJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.modelBundle.installJob.name }}
+  labels:
+    {{- include "patentshield.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: patentshield
+        app.kubernetes.io/component: model-installer
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "patentshield.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: install-models
+          image: {{ include "patentshield.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "deployment.model_bundle", "install", "--bundle", "/model-bundle", "--target", "/models", "--replace"]
+          volumeMounts:
+            - { name: model-bundle, mountPath: /model-bundle, readOnly: true }
+            - { name: models, mountPath: /models }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 2Gi }
+          securityContext:
+            {{- include "patentshield.containerSecurityContext" . | nindent 12 }}
+      volumes:
+        - name: model-bundle
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelBundle.bundleClaim }}
+            readOnly: true
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelBundle.modelClaim }}
+        - name: tmp
+          emptyDir: { sizeLimit: 128Mi }
+{{- end }}

@@ -1,0 +1,23 @@
+# Example only. Set storageClassName to a customer-approved encrypted storage
+# class supporting ReadWriteMany. Claims are provisioned out-of-band by default.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: patentshield-model-bundle
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: REPLACE_WITH_CUSTOMER_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: patentshield-models
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: REPLACE_WITH_CUSTOMER_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 30Gi

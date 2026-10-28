@@ -1,0 +1,47 @@
+# Copy to a protected customer deployment repository and edit every site-specific
+# value. Never place secrets in this file; they belong in runtimeSecret.
+image:
+  repository: registry.internal.example/patentshield
+  digest: "sha256:REPLACE_WITH_APPROVED_64_HEX_IMAGE_DIGEST"
+  pullSecrets:
+    - name: internal-registry-pull
+
+runtimeSecret: patentshield-runtime
+storage:
+  backend: s3
+modelBundle:
+  bundleClaim: patentshield-model-bundle
+  modelClaim: patentshield-models
+  installJob:
+    enabled: false
+    name: patentshield-model-bundle-install
+
+ingress:
+  enabled: true
+  className: internal-nginx
+  host: patentshield.customer.internal
+  tlsSecretName: patentshield-ingress-tls
+
+networkPolicy:
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+  ingressControllerPodSelector:
+    app.kubernetes.io/name: ingress-nginx
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+  # Keep default same-namespace DB/Redis selectors unless customer labels differ.
+  # For externally managed private endpoints, add reviewed, narrow CIDRs/ports:
+  additionalEgressCIDRs:
+    - cidr: 10.80.10.12/32
+      ports: [5432]
+    - cidr: 10.80.10.13/32
+      ports: [6379]
+    - cidr: 10.80.20.15/32
+      ports: [443]
+
+replicas:
+  api: 2
+  worker: 2
+  beat: 1

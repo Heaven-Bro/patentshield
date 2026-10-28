@@ -1,0 +1,16 @@
+{{- if and .Values.persistence.createMediaPVC (eq .Values.storage.backend "filesystem") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.storage.filesystemClaim }}
+  labels:
+    {{- include "patentshield.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: {{ .Values.persistence.mediaSize }}
+  {{- if .Values.persistence.mediaStorageClass }}
+  storageClassName: {{ .Values.persistence.mediaStorageClass | quote }}
+  {{- end }}
+{{- end }}

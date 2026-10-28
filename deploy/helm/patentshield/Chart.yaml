@@ -1,0 +1,11 @@
+apiVersion: v2
+name: patentshield
+version: 0.9.0
+appVersion: "phase-9"
+description: Private-cloud and air-gapped deployment of the PatentShield application
+keywords:
+  - legaltech
+  - patent-intelligence
+  - air-gapped
+  - private-cloud
+type: application

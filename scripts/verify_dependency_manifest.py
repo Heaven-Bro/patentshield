@@ -38,6 +38,7 @@ REQUIRED_PACKAGES: dict[str, set[str]] = {
         "authlib",
         "python3-saml",
         "xmlsec",
+        "django-storages",
     },
     "requirements-dev.txt": {"pytest", "pytest-django", "psutil"},
     "requirements-ml.txt": {"sentence-transformers", "transformers", "torch"},

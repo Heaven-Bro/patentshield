@@ -1,0 +1,2 @@
+# Replace with the real digest-pinned application image released and signed by your organization.
+# Format: registry.example.invalid/patentshield@sha256:<64 lowercase hexadecimal characters>
