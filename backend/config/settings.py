@@ -115,6 +115,7 @@ INSTALLED_APPS = [
     "reports",
     "office_actions.apps.OfficeActionsConfig",
     "multilingual_search.apps.MultilingualSearchConfig",
+    "fto.apps.FTOConfig",
 ]
 
 MIDDLEWARE = [
@@ -411,6 +412,13 @@ PATENTSHIELD_MAX_PDF_UPLOAD_BYTES = int(
 )
 if PATENTSHIELD_MAX_PDF_UPLOAD_BYTES <= 0:
     raise ImproperlyConfigured("PATENTSHIELD_MAX_PDF_UPLOAD_BYTES must be positive.")
+PATENTSHIELD_FTO_MAX_UPLOAD_BYTES = int(
+    os.getenv("PATENTSHIELD_FTO_MAX_UPLOAD_BYTES", str(min(PATENTSHIELD_MAX_PDF_UPLOAD_BYTES, 30 * 1024 * 1024)))
+)
+if PATENTSHIELD_FTO_MAX_UPLOAD_BYTES <= 0 or PATENTSHIELD_FTO_MAX_UPLOAD_BYTES > PATENTSHIELD_MAX_PDF_UPLOAD_BYTES:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_FTO_MAX_UPLOAD_BYTES must be positive and no greater than PATENTSHIELD_MAX_PDF_UPLOAD_BYTES."
+    )
 if not DEBUG and PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS:
     raise ImproperlyConfigured(
         "Mock embeddings must be disabled when DJANGO_DEBUG=False."
