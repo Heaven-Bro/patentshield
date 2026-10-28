@@ -33,6 +33,7 @@ docker compose exec -T api python manage.py makemigrations --check --dry-run
 printf '\n[6/9] Django app regression suites\n'
 docker compose exec -T api python manage.py test \
   accounts tenants audit patents ingestion indexing retrieval ai_engine analyses reports \
+  office_actions multilingual_search fto landscapes \
   --verbosity 1
 
 printf '\n[7/9] Tenant isolation, release integration, retry, and SLA tests\n'
@@ -54,4 +55,4 @@ else
   printf '\n[9/9] Real-model retrieval SLA skipped (set PATENTSHIELD_RUN_REAL_ML_SLA=1 to enable)\n'
 fi
 
-printf '\nPatentShield release gate passed. Review the remaining manual checks in PHASE_6_README.md.\n'
+printf '\nPatentShield release gate passed. Review phase-specific manual checks under docs/PHASE_3 through docs/PHASE_7.\n'
