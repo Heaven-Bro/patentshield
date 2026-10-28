@@ -8,6 +8,7 @@ import OfficeActionAssistant from "./components/OfficeActionAssistant";
 import MultilingualSearch from "./components/MultilingualSearch";
 import FTOWorkspace from "./components/FTOWorkspace";
 import LandscapeAnalytics from "./components/LandscapeAnalytics";
+import EnterpriseAdminConsole from "./components/EnterpriseAdminConsole";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
@@ -297,6 +298,12 @@ export default function App() {
                 aria-pressed={activeSection === "landscape"}
                 className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "landscape" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
               >Landscape</button>
+              {activeTenant && ["OWNER", "ADMIN"].includes(activeTenant.role) && <button
+                type="button"
+                onClick={() => setActiveSection("enterprise-admin")}
+                aria-pressed={activeSection === "enterprise-admin"}
+                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "enterprise-admin" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+              >Enterprise Admin</button>}
               <div className="flex items-center justify-between gap-3 sm:justify-end">
               <div className="min-w-0 text-right">
                 <p className="max-w-48 truncate text-sm font-semibold text-slate-800">{user?.full_name || user?.username}</p>
@@ -344,6 +351,8 @@ export default function App() {
         <FTOWorkspace key={activeTenant.id} tenant={activeTenant} patents={patents} />
       ) : activeSection === "landscape" ? (
         <LandscapeAnalytics key={activeTenant.id} tenant={activeTenant} />
+      ) : activeSection === "enterprise-admin" && ["OWNER", "ADMIN"].includes(activeTenant.role) ? (
+        <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
       ) : (
         <>
           <PatentsDashboard
