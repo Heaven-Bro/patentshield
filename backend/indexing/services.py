@@ -15,12 +15,12 @@ from uuid import UUID
 from django.conf import settings
 
 from indexing.models import TextChunk
+from indexing.language import has_substantial_cjk, tokenize_original_language
 from tenants.models import Tenant
 
 logger = logging.getLogger(__name__)
 
 _TOKEN_PATTERN = re.compile(r"\S+", flags=re.UNICODE)
-_LEXICAL_TOKEN_PATTERN = re.compile(r"[\w]+", flags=re.UNICODE)
 
 
 class ChunkData(TypedDict):
@@ -43,9 +43,9 @@ class HybridChunker:
     """Create overlapping text windows while preserving source character spans.
 
     The default tokenizer treats each whitespace-delimited span as one token.
-    This deterministic fallback avoids downloading a tokenizer in workers and
-    preserves exact character offsets. It is an approximation of subword token
-    counts; ``max_tokens`` therefore represents whitespace tokens here.
+    For CJK text, it uses visible Unicode characters as chunking units so text
+    without spaces does not become one oversized chunk. Both modes preserve
+    exact source character offsets and avoid downloading tokenizers in workers.
     """
 
     @staticmethod
@@ -58,8 +58,9 @@ class HybridChunker:
 
         Args:
             text: Source text to split.
-            max_tokens: Maximum number of whitespace tokens per chunk.
-            overlap: Number of tokens repeated between adjacent chunks.
+            max_tokens: Maximum chunk units: whitespace tokens for ordinary text,
+                visible Unicode characters for CJK-dominant text.
+            overlap: Number of units repeated between adjacent chunks.
 
         Returns:
             Chunks containing the exact source substring and its offsets.
@@ -74,7 +75,12 @@ class HybridChunker:
         if not text or not text.strip():
             return []
 
-        tokens = list(_TOKEN_PATTERN.finditer(text))
+        if has_substantial_cjk(text):
+            # CJK patents commonly omit spaces between words. Character windows
+            # keep those documents bounded for embedding and selected translation.
+            tokens = list(re.finditer(r"\S", text, flags=re.UNICODE))
+        else:
+            tokens = list(_TOKEN_PATTERN.finditer(text))
         if not tokens:
             return []
 
@@ -237,7 +243,7 @@ class BGEEmbedder:
 
 
 class BM25LexicalIndex:
-    """In-memory BM25 index over tenant-scoped chunks.
+    """In-memory BM25 index over tenant-scoped chunks using original-script tokens.
 
     The index is deliberately an explicit service object: build it once per
     worker/request batch and reuse it for multiple queries. It is not a shared
@@ -339,8 +345,5 @@ class BM25LexicalIndex:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Normalize text for a simple Unicode-aware BM25 tokenizer."""
-        return [
-            token.casefold()
-            for token in _LEXICAL_TOKEN_PATTERN.findall(text)
-        ]
+        """Normalize text for Unicode-aware, original-language BM25 retrieval."""
+        return tokenize_original_language(text)

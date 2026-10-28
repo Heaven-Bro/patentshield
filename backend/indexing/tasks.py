@@ -18,6 +18,7 @@ from django.db import transaction
 
 from audit.models import AuditLog
 from indexing.models import TextChunk
+from indexing.language import detect_language_code
 from indexing.services import BGEEmbedder, HybridChunker
 from patents.models import Claim, Patent, PatentDocumentVersion, Schematic
 
@@ -266,6 +267,7 @@ def _build_text_chunk_records(
                     section_type=source.section_type,
                     claim_number=source.claim_number,
                     text=chunk["text"],
+                    language_code=detect_language_code(chunk["text"]),
                     page_start=page_start,
                     page_end=page_end,
                     char_start=char_start,

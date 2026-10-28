@@ -39,6 +39,7 @@ class TextChunk(TenantScopedModel):
     )
     claim_number = models.CharField(max_length=30, null=True, blank=True)
     text = models.TextField()
+    language_code = models.CharField(max_length=8, default="und", db_index=True)
     page_start = models.IntegerField(null=True, blank=True)
     page_end = models.IntegerField(null=True, blank=True)
     char_start = models.IntegerField(null=True, blank=True)
