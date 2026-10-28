@@ -16,6 +16,7 @@ urlpatterns = [
     path("api/v1/", include("analyses.urls")),
     path("api/v1/reports/", include("reports.urls")),
     path("api/v1/office-actions/", include("office_actions.urls")),
+    path("api/v1/multilingual-search/", include("multilingual_search.urls")),
 ]
 
 if settings.DEBUG:

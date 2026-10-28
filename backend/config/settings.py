@@ -114,6 +114,7 @@ INSTALLED_APPS = [
     "analyses",
     "reports",
     "office_actions.apps.OfficeActionsConfig",
+    "multilingual_search.apps.MultilingualSearchConfig",
 ]
 
 MIDDLEWARE = [
@@ -337,6 +338,74 @@ PATENTSHIELD_EPO_MIN_INTERVAL_SECONDS = float(
 PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS = _env_bool(
     "PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS", DEBUG
 )
+
+# Phase 5 — on-demand translation is an explicit disclosure operation. It stays
+# disabled until a provider endpoint and per-tenant allowlist are configured.
+PATENTSHIELD_TRANSLATION_ENABLED = _env_bool(
+    "PATENTSHIELD_TRANSLATION_ENABLED", False
+)
+PATENTSHIELD_TRANSLATION_URL = os.getenv(
+    "PATENTSHIELD_TRANSLATION_URL", ""
+).strip().rstrip("/")
+PATENTSHIELD_TRANSLATION_API_KEY = os.getenv(
+    "PATENTSHIELD_TRANSLATION_API_KEY", ""
+).strip()
+PATENTSHIELD_TRANSLATION_ALLOWED_TENANTS = _env_csv(
+    "PATENTSHIELD_TRANSLATION_ALLOWED_TENANTS", ""
+)
+PATENTSHIELD_TRANSLATION_ENGINE_VERSION = os.getenv(
+    "PATENTSHIELD_TRANSLATION_ENGINE_VERSION", "configured-v1"
+).strip() or "configured-v1"
+if len(PATENTSHIELD_TRANSLATION_ENGINE_VERSION) > 80:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_TRANSLATION_ENGINE_VERSION must be at most 80 characters."
+    )
+PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS = float(
+    os.getenv("PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS", "15")
+)
+PATENTSHIELD_TRANSLATION_MAX_INPUT_CHARS = int(
+    os.getenv("PATENTSHIELD_TRANSLATION_MAX_INPUT_CHARS", "8000")
+)
+PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS = int(
+    os.getenv("PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS", "30000")
+)
+if not 1 <= PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS <= 60:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS must be between 1 and 60."
+    )
+if not 100 <= PATENTSHIELD_TRANSLATION_MAX_INPUT_CHARS <= 20000:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_TRANSLATION_MAX_INPUT_CHARS must be between 100 and 20000."
+    )
+if not 100 <= PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS <= 60000:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS must be between 100 and 60000."
+    )
+if PATENTSHIELD_TRANSLATION_ENABLED:
+    translation_url_parts = urlsplit(PATENTSHIELD_TRANSLATION_URL)
+    if (
+        translation_url_parts.scheme not in {"https", "http"}
+        or not translation_url_parts.hostname
+        or translation_url_parts.username
+        or translation_url_parts.password
+        or translation_url_parts.query
+        or translation_url_parts.fragment
+    ):
+        raise ImproperlyConfigured(
+            "PATENTSHIELD_TRANSLATION_URL must be a base HTTP(S) URL without "
+            "embedded credentials, query parameters, or a fragment."
+        )
+    if not DEBUG and translation_url_parts.scheme != "https":
+        raise ImproperlyConfigured(
+            "Production translation provider URLs must use HTTPS."
+        )
+    if not PATENTSHIELD_TRANSLATION_ALLOWED_TENANTS:
+        raise ImproperlyConfigured(
+            "Translation is enabled but PATENTSHIELD_TRANSLATION_ALLOWED_TENANTS "
+            "is empty; explicitly authorize the tenants permitted to disclose "
+            "selected patent text to the translation service."
+        )
+
 PATENTSHIELD_MAX_PDF_UPLOAD_BYTES = int(
     os.getenv("PATENTSHIELD_MAX_PDF_UPLOAD_BYTES", str(100 * 1024 * 1024))
 )
