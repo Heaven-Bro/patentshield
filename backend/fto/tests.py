@@ -1,6 +1,7 @@
 """FTO workflow tests: source provenance, limitation mapping, and tenant isolation."""
 from __future__ import annotations
 
+from urllib import response
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -191,7 +192,7 @@ class FTOApiTests(TestCase):
             **self.headers,
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn("separate review action", str(response.data))
+        self.assertIn("separate review-state action", str(response.data))
 
     def test_attorney_annotation_is_persisted_and_source_scoped(self):
         study = self._create_study()
