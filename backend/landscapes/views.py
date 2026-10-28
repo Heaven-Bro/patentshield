@@ -46,6 +46,7 @@ from landscapes.services import (
 from landscapes.tasks import build_landscape
 from patents.intelligence_models import PatentPublication
 from tenants.models import TenantMembership
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from tenants.permissions import HasTenantAccess
 
 
@@ -83,6 +84,7 @@ class LandscapeAPIView(APIView):
         study = LandscapeStudy.objects.for_tenant(request.tenant.pk).filter(pk=study_id).first()
         if study is None:
             raise NotFound("Landscape study was not found in this tenant.")
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=study.pk, required="READ")
         return study
 
 
@@ -172,8 +174,10 @@ class PublicationSearchView(LandscapeAPIView):
 
 class LandscapeStudyListCreateView(LandscapeAPIView):
     def get(self, request: Request) -> Response:
-        rows = LandscapeStudy.objects.for_tenant(self.tenant(request).pk).select_related("created_by")[:200]
-        return Response({"count": LandscapeStudy.objects.for_tenant(self.tenant(request).pk).count(), "results": [_study_payload(row) for row in rows]})
+        queryset = LandscapeStudy.objects.for_tenant(self.tenant(request).pk).select_related("created_by")
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="landscape_study")
+        rows = list(queryset[:200])
+        return Response({"count": queryset.count(), "results": [_study_payload(row) for row in rows]})
 
     def post(self, request: Request) -> Response:
         tenant = self.tenant(request)
@@ -192,6 +196,7 @@ class LandscapeStudyDetailView(LandscapeAPIView):
     def patch(self, request: Request, study_id: str) -> Response:
         self.require_role(request, _EDITOR_ROLES)
         study = self.get_study(request, study_id)
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=study.pk, required="EDIT")
         if study.status == LandscapeStudy.Status.ARCHIVED:
             raise ValidationError("Archived landscape studies cannot be edited.")
         serializer = LandscapeStudyUpdateSerializer(study, data=request.data, partial=True)
@@ -214,6 +219,7 @@ class LandscapeStudyPublicationsView(LandscapeAPIView):
     def post(self, request: Request, study_id: str) -> Response:
         self.require_role(request, _EDITOR_ROLES)
         study = self.get_study(request, study_id)
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=study.pk, required="EDIT")
         if study.status == LandscapeStudy.Status.ARCHIVED:
             raise ValidationError("Archived studies cannot accept new publications.")
         serializer = PublicationSelectionSerializer(data=request.data)
@@ -247,6 +253,7 @@ class LandscapeBuildView(LandscapeAPIView):
     def post(self, request: Request, study_id: str) -> Response:
         self.require_role(request, _EDITOR_ROLES)
         study = self.get_study(request, study_id)
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=study.pk, required="EDIT")
         if study.status == LandscapeStudy.Status.ARCHIVED:
             raise ValidationError("Archived studies cannot be built.")
         count = LandscapeStudyPublication.objects.filter(tenant_id=study.tenant_id, study=study).count()
@@ -492,6 +499,7 @@ class LandscapeAnnotationListCreateView(LandscapeAPIView):
     def post(self, request: Request, study_id: str) -> Response:
         self.require_role(request, _EDITOR_ROLES)
         study = self.get_study(request, study_id)
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=study.pk, required="EDIT")
         if study.status == LandscapeStudy.Status.ARCHIVED:
             raise ValidationError("Archived studies cannot receive new annotations.")
         serializer = LandscapeAnnotationCreateSerializer(data=request.data)
@@ -518,6 +526,7 @@ class LandscapeAnnotationDetailView(LandscapeAPIView):
         allowed = {"body", "status"}
         if set(values) - allowed:
             raise ValidationError({"detail": "Only body and status may be updated."})
+        require_matter_access(request=request, matter_type="landscape_study", matter_id=annotation.study_id, required="REVIEW" if "status" in values else "EDIT")
         if "body" in values:
             self.require_role(request, _EDITOR_ROLES)
             body = str(values["body"]).strip()

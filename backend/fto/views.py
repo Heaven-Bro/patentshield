@@ -49,6 +49,7 @@ from fto.serializers import (
 )
 from fto.services import audit_fto_event, split_claim_limitations
 from fto.tasks import process_product_version
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import Tenant, TenantMembership
 from tenants.permissions import HasTenantAccess
@@ -120,21 +121,25 @@ class FTOAPIView(APIView):
         return _tenant(request)
 
     def product(self, request: Request, product_id) -> ProductMatter:
-        tenant_id = self.tenant(request).pk
-        return get_object_or_404(ProductMatter.objects.for_tenant(tenant_id), pk=product_id)
+        tenant = self.tenant(request)
+        matter = get_object_or_404(ProductMatter.objects.for_tenant(tenant.pk), pk=product_id)
+        require_matter_access(request=request, matter_type="product_matter", matter_id=matter.pk, required="READ")
+        return matter
 
     def version(self, request: Request, version_id) -> ProductVersion:
         tenant_id = self.tenant(request).pk
-        return get_object_or_404(
+        version = get_object_or_404(
             ProductVersion.objects.for_tenant(tenant_id)
             .filter(product__tenant_id=tenant_id)
             .select_related("product", "created_by"),
             pk=version_id,
         )
+        require_matter_access(request=request, matter_type="product_matter", matter_id=version.product_id, required="READ")
+        return version
 
     def study(self, request: Request, study_id) -> FTOStudy:
         tenant_id = self.tenant(request).pk
-        return get_object_or_404(
+        study = get_object_or_404(
             FTOStudy.objects.for_tenant(tenant_id)
             .filter(
                 product_version__tenant_id=tenant_id,
@@ -146,6 +151,10 @@ class FTOAPIView(APIView):
             .select_related("product_version__product", "patent", "patent_document_version", "created_by"),
             pk=study_id,
         )
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="READ")
+        require_matter_access(request=request, matter_type="product_matter", matter_id=study.product_version.product_id, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=study.patent_id, required="READ")
+        return study
 
 
 def _version_queryset(tenant_id, product_id):
@@ -159,6 +168,7 @@ class ProductMatterListCreateView(FTOAPIView):
     def get(self, request: Request) -> Response:
         tenant_id = self.tenant(request).pk
         queryset = ProductMatter.objects.for_tenant(tenant_id).annotate(version_count=Count("versions", filter=Q(versions__tenant_id=tenant_id), distinct=True))
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="product_matter")
         search = request.query_params.get("search", "").strip()[:100]
         if search:
             queryset = queryset.filter(Q(name__icontains=search) | Q(product_code__icontains=search))
@@ -183,6 +193,7 @@ class ProductMatterDetailView(FTOAPIView):
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES, "Your tenant role cannot edit product matters.")
         matter = self.product(request, product_id)
+        require_matter_access(request=request, matter_type="product_matter", matter_id=matter.pk, required="EDIT")
         serializer = ProductMatterSerializer(matter, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         matter = serializer.save()
@@ -204,6 +215,7 @@ class ProductVersionListCreateView(FTOAPIView):
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES, "Your tenant role cannot upload product specifications.")
         matter = self.product(request, product_id)
+        require_matter_access(request=request, matter_type="product_matter", matter_id=matter.pk, required="EDIT")
         upload = request.FILES.get("file")
         if upload is None:
             raise ValidationError({"file": "Upload a product specification PDF."})
@@ -285,6 +297,7 @@ class ProductFeatureListCreateView(FTOAPIView):
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES, "Your tenant role cannot add product features.")
         version = self.version(request, version_id)
+        require_matter_access(request=request, matter_type="product_matter", matter_id=version.product_id, required="EDIT")
         if version.extraction_status != ProductVersion.ExtractionStatus.EXTRACTED:
             raise ValidationError({"product_version": "Wait for product-specification extraction to complete before adding a feature."})
         serializer = ManualFeatureCreateSerializer(data=request.data)
@@ -325,13 +338,16 @@ class ProductFeatureListCreateView(FTOAPIView):
 class ProductFeatureDetailView(FTOAPIView):
     def get(self, request: Request, feature_id) -> Response:
         tenant_id = self.tenant(request).pk
-        feature = get_object_or_404(ProductFeature.objects.for_tenant(tenant_id).filter(product_version__tenant_id=tenant_id, product_version__product__tenant_id=tenant_id), pk=feature_id)
+        feature = get_object_or_404(ProductFeature.objects.for_tenant(tenant_id).select_related("product_version").filter(product_version__tenant_id=tenant_id, product_version__product__tenant_id=tenant_id), pk=feature_id)
+        require_matter_access(request=request, matter_type="product_matter", matter_id=feature.product_version.product_id, required="READ")
         return Response(ProductFeatureSerializer(feature).data)
 
     def patch(self, request: Request, feature_id) -> Response:
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES | _REVIEW_ROLES, "Your tenant role cannot review product features.")
         feature = get_object_or_404(ProductFeature.objects.for_tenant(tenant.pk).select_related("product_version"), pk=feature_id, product_version__tenant_id=tenant.pk, product_version__product__tenant_id=tenant.pk)
+        required = "REVIEW" if "review_status" in request.data else "EDIT"
+        require_matter_access(request=request, matter_type="product_matter", matter_id=feature.product_version.product_id, required=required)
         serializer = ProductFeatureReviewSerializer(feature, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         cited = LimitationEvidence.objects.for_tenant(tenant.pk).filter(feature=feature, assessment__tenant_id=tenant.pk).exists()
@@ -353,7 +369,11 @@ class ProductFeatureDetailView(FTOAPIView):
 class FTOStudyListCreateView(FTOAPIView):
     def get(self, request: Request) -> Response:
         tenant_id = self.tenant(request).pk
-        queryset = FTOStudy.objects.for_tenant(tenant_id).filter(product_version__tenant_id=tenant_id, patent__tenant_id=tenant_id, patent_document_version__tenant_id=tenant_id).annotate(
+        queryset = FTOStudy.objects.for_tenant(tenant_id).filter(product_version__tenant_id=tenant_id, patent__tenant_id=tenant_id, patent_document_version__tenant_id=tenant_id)
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="fto_study")
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="product_matter", id_field="product_version__product_id")
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="patent", id_field="patent_id")
+        queryset = queryset.annotate(
             limitation_count=Count("limitations", filter=Q(limitations__tenant_id=tenant_id), distinct=True),
             reviewed_count=Count("assessments", filter=Q(assessments__tenant_id=tenant_id, assessments__review_status=LimitationAssessment.ReviewStatus.REVIEWED), distinct=True),
         ).select_related("product_version__product", "patent", "patent_document_version")
@@ -369,9 +389,11 @@ class FTOStudyListCreateView(FTOAPIView):
         payload.is_valid(raise_exception=True)
         values = payload.validated_data
         product_version = get_object_or_404(ProductVersion.objects.for_tenant(tenant.pk).filter(product__tenant_id=tenant.pk), pk=values["product_version_id"])
+        require_matter_access(request=request, matter_type="product_matter", matter_id=product_version.product_id, required="EDIT")
         if product_version.extraction_status != ProductVersion.ExtractionStatus.EXTRACTED:
             raise ValidationError({"product_version_id": "The selected product specification must finish text extraction before an FTO study can be created."})
         patent = get_object_or_404(Patent.objects.for_tenant(tenant.pk), pk=values["patent_id"])
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="READ")
         selected_version_id = values.get("patent_document_version_id")
         if selected_version_id:
             patent_version = get_object_or_404(PatentDocumentVersion.objects.for_tenant(tenant.pk).filter(patent=patent, patent__tenant_id=tenant.pk), pk=selected_version_id)
@@ -446,6 +468,7 @@ class FTOStudyDetailView(FTOAPIView):
         tenant = self.tenant(request)
         study = self.study(request, study_id)
         new_status = request.data.get("status")
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="REVIEW" if new_status == FTOStudy.Status.REVIEWED else "EDIT")
         allowed = {FTOStudy.Status.DRAFT, FTOStudy.Status.IN_PROGRESS, FTOStudy.Status.READY_FOR_REVIEW, FTOStudy.Status.ARCHIVED}
         if new_status not in allowed and new_status != FTOStudy.Status.REVIEWED:
             raise ValidationError({"status": "Unsupported study status transition."})
@@ -564,6 +587,7 @@ class LimitationAssessmentUpdateView(FTOAPIView):
         serializer = LimitationAssessmentSerializer(assessment, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         validated = serializer.validated_data
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="REVIEW" if "review_status" in validated else "EDIT")
         triage_changed = (
             ("triage_status" in validated and validated["triage_status"] != assessment.triage_status)
             or ("triage_rationale" in validated and validated["triage_rationale"] != assessment.triage_rationale)
@@ -614,6 +638,7 @@ class LimitationEvidenceListCreateView(FTOAPIView):
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES | _REVIEW_ROLES, "Your tenant role cannot add evidence to this assessment.")
         study = self.study(request, study_id)
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="EDIT")
         assessment = get_object_or_404(LimitationAssessment.objects.for_tenant(tenant.pk).filter(study=study, limitation_id=limitation_id, limitation__tenant_id=tenant.pk))
         payload = LimitationEvidenceCreateSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
@@ -673,6 +698,7 @@ class AttorneyAnnotationListCreateView(FTOAPIView):
         tenant = self.tenant(request)
         _require_role(request, _EDITOR_ROLES | _REVIEW_ROLES, "Your tenant role cannot create attorney annotations.")
         study = self.study(request, study_id)
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="EDIT")
         payload = AttorneyAnnotationCreateSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         values = payload.validated_data
@@ -705,6 +731,7 @@ class AttorneyAnnotationResolveView(FTOAPIView):
             assessment__limitation__tenant_id=tenant.pk,
             assessment__limitation__claim__tenant_id=tenant.pk,
         ), pk=annotation_id)
+        require_matter_access(request=request, matter_type="fto_study", matter_id=annotation.assessment.study_id, required="REVIEW")
         resolved = request.data.get("resolved", True)
         if not isinstance(resolved, bool):
             raise ValidationError({"resolved": "resolved must be a boolean."})

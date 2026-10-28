@@ -26,6 +26,7 @@ from ingestion.tasks import process_patent_document_version
 from patents.models import Claim, Patent, PatentDocumentVersion
 from patents.serializers import PatentDocumentUploadSerializer
 from tenants.models import Tenant, TenantMembership
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from tenants.permissions import HasTenantAccess, RequireTenantRole
 
 logger = logging.getLogger(__name__)
@@ -61,11 +62,9 @@ class PatentListView(TenantPatentAPIView):
     def get(self, request: Request) -> Response:
         tenant_id = self.get_tenant_id(request)
         version_queryset = PatentDocumentVersion.objects.for_tenant(tenant_id)
-        patents = (
-            Patent.objects.for_tenant(tenant_id)
-            .order_by("-created_at")
-            .prefetch_related(Prefetch("versions", queryset=version_queryset))
-        )
+        patents = Patent.objects.for_tenant(tenant_id)
+        patents = filter_visible_matter_queryset(patents, tenant=self.get_tenant(request), user=request.user, matter_type="patent")
+        patents = patents.order_by("-created_at").prefetch_related(Prefetch("versions", queryset=version_queryset))
         return Response({"results": [_serialize_patent(request, p) for p in patents]})
 
 
@@ -91,6 +90,7 @@ class PatentClaimsView(TenantPatentAPIView):
         except (Patent.DoesNotExist, PatentDocumentVersion.DoesNotExist) as exc:
             raise NotFound("Patent document version was not found.") from exc
 
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="READ")
         if (
             patent.tenant_id != tenant_id
             or version.tenant_id != tenant_id
@@ -277,6 +277,7 @@ class PatentDetailView(TenantPatentAPIView):
             )
         except Patent.DoesNotExist as exc:
             raise NotFound("Patent was not found.") from exc
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="READ")
         return Response(_serialize_patent(request, patent))
 
 
@@ -299,6 +300,7 @@ class PatentVersionFileView(TenantPatentAPIView):
         except PatentDocumentVersion.DoesNotExist as exc:
             raise NotFound("Patent document version was not found.") from exc
 
+        require_matter_access(request=request, matter_type="patent", matter_id=version.patent_id, required="READ")
         if (
             version.patent.tenant_id != tenant_id
             or version.tenant_id != tenant_id
@@ -352,6 +354,7 @@ class PatentVersionProcessView(TenantPatentAPIView):
 
         if version.patent.tenant_id != tenant.pk:
             raise NotFound("Patent document version was not found.")
+        require_matter_access(request=request, matter_type="patent", matter_id=version.patent_id, required="EDIT")
         if version.extraction_status not in {
             PatentDocumentVersion.ExtractionStatus.PENDING,
             PatentDocumentVersion.ExtractionStatus.FAILED,

@@ -20,6 +20,7 @@ from analyses.models import AnalysisReport, ClaimAssessment
 from audit.models import AuditLog
 from reports.tasks import generate_analysis_report
 from tenants.models import TenantMembership
+from enterprise_identity.services import require_matter_access
 from tenants.permissions import HasTenantAccess, RequireTenantRole
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ class ReportAPIView(APIView):
             != report.target_document_version_id
         ):
             raise NotFound("Analysis report was not found.")
+        require_matter_access(request=request, matter_type="analysis", matter_id=report.pk, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=report.patent_id, required="READ")
         return report
 
 

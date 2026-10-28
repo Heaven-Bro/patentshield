@@ -52,7 +52,7 @@ def audit_identity(*, tenant: Tenant, actor, action: str, resource_type: str, re
     try:
         AuditLog.objects.create(
             tenant=tenant,
-            actor_user=actor if getattr(actor, "is_authenticated", False) else None,
+            actor_user_id=actor.id if getattr(actor, "is_authenticated", False) else None,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,

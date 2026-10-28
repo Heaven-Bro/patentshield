@@ -40,6 +40,7 @@ from reports.models import (
     ClaimChartRow,
 )
 from reports.claim_chart_tasks import generate_claim_chart_export
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from tenants.permissions import HasTenantAccess, RequireTenantRole
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,9 @@ class ClaimChartAPIView(APIView):
         except DjangoValidationError as exc:
             logger.error("Claim chart %s has invalid parent relationships.", chart.pk)
             raise NotFound("Claim chart was not found.") from exc
+        require_matter_access(request=request, matter_type="claim_chart", matter_id=chart.pk, required="READ")
+        require_matter_access(request=request, matter_type="analysis", matter_id=chart.analysis_id, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=chart.analysis.patent_id, required="READ")
         return chart
 
     def audit(
@@ -102,7 +106,7 @@ class ClaimChartAPIView(APIView):
         )
         AuditLog.objects.create(
             tenant_id=tenant_id,
-            actor_user_id=request.user.pk if request.user.is_authenticated else None,
+            actor_user_id=request.user.id if getattr(request.user, "is_authenticated", False) else None,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,
@@ -137,6 +141,9 @@ class ClaimChartListCreateView(ClaimChartAPIView):
             )
             .order_by("-updated_at")
         )
+        queryset = filter_visible_matter_queryset(queryset, tenant=request.tenant, user=request.user, matter_type="claim_chart")
+        queryset = filter_visible_matter_queryset(queryset, tenant=request.tenant, user=request.user, matter_type="analysis", id_field="analysis_id")
+        queryset = filter_visible_matter_queryset(queryset, tenant=request.tenant, user=request.user, matter_type="patent", id_field="analysis__patent_id")
         analysis_id = request.query_params.get("analysis_id")
         if analysis_id:
             try:
@@ -164,6 +171,7 @@ class ClaimChartListCreateView(ClaimChartAPIView):
     def post(self, request: Request) -> Response:
         serializer = ClaimChartCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        require_matter_access(request=request, matter_type="analysis", matter_id=serializer.validated_data["analysis_id"], required="READ")
         try:
             chart = create_chart_from_analysis(
                 tenant_id=self.tenant_id(request),
@@ -202,6 +210,8 @@ class ClaimChartDetailView(ClaimChartAPIView):
 
         with transaction.atomic():
             chart = self.get_chart(request, chart_id, lock=True)
+            requested_status = changes.get("status", chart.status)
+            require_matter_access(request=request, matter_type="claim_chart", matter_id=chart.pk, required="REVIEW" if requested_status in {ClaimChart.Status.IN_REVIEW, ClaimChart.Status.APPROVED} else "EDIT")
             if chart.status == ClaimChart.Status.ARCHIVED:
                 raise PermissionDenied("Archived claim charts are immutable.")
             metadata_changes = set(changes) & {"title", "description"}
@@ -314,6 +324,7 @@ class ClaimChartRowUpdateView(ClaimChartAPIView):
 
         with transaction.atomic():
             chart = self.get_chart(request, chart_id, lock=True)
+            require_matter_access(request=request, matter_type="claim_chart", matter_id=chart.pk, required="REVIEW" if role == "REVIEWER" or "attorney_decision" in changes else "EDIT")
             if chart.status not in {
                 ClaimChart.Status.DRAFT,
                 ClaimChart.Status.IN_REVIEW,
@@ -493,6 +504,9 @@ class ClaimChartExportStatusView(ClaimChartAPIView):
             or export.revision.tenant_id != tenant_id
         ):
             raise NotFound("Claim-chart export was not found.")
+        require_matter_access(request=request, matter_type="claim_chart", matter_id=export.chart_id, required="READ")
+        require_matter_access(request=request, matter_type="analysis", matter_id=export.chart.analysis_id, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=export.chart.analysis.patent_id, required="READ")
         available = (
             export.status == ClaimChartExport.Status.COMPLETED
             and _storage_exists(export.storage_key)
@@ -539,6 +553,9 @@ class ClaimChartExportDownloadView(ClaimChartAPIView):
             or export.revision.tenant_id != tenant_id
         ):
             raise NotFound("Claim-chart export was not found.")
+        require_matter_access(request=request, matter_type="claim_chart", matter_id=export.chart_id, required="READ")
+        require_matter_access(request=request, matter_type="analysis", matter_id=export.chart.analysis_id, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=export.chart.analysis.patent_id, required="READ")
         if not _storage_exists(export.storage_key):
             raise NotFound("The requested claim-chart artifact is unavailable.")
         try:

@@ -50,6 +50,7 @@ from office_actions.services import (
     record_review,
 )
 from office_actions.tasks import process_office_action
+from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from patents.models import Patent
 from tenants.models import Tenant, TenantMembership
 from tenants.permissions import HasTenantAccess, RequireTenantRole
@@ -92,7 +93,7 @@ def _enqueue_office_action(office_action: OfficeAction, actor) -> str | None:
         try:
             AuditLog.objects.create(
                 tenant_id=office_action.tenant_id,
-                actor_user_id=actor.pk,
+                actor_user_id=actor.id if getattr(actor, "is_authenticated", False) else None,
                 action="OFFICE_ACTION_PROCESS_ENQUEUE_FAILED",
                 resource_type="OfficeAction",
                 resource_id=office_action.pk,
@@ -137,14 +138,20 @@ class TenantOfficeActionAPIView(APIView):
                 Prefetch("cited_references", queryset=CitedReference.objects.for_tenant(tenant_id).filter(office_action__tenant_id=tenant_id)),
             )
         )
-        return get_object_or_404(action_queryset, pk=action_id)
+        action = get_object_or_404(action_queryset, pk=action_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=action.pk, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=action.patent_id, required="READ")
+        return action
 
     def draft(self, request: Request, draft_id) -> ResponseDraft:
         tenant_id = self.tenant(request).pk
-        return get_object_or_404(
-            ResponseDraft.objects.for_tenant(tenant_id).filter(office_action__tenant_id=tenant_id, office_action__patent__tenant_id=tenant_id).select_related("office_action", "created_by"),
+        draft = get_object_or_404(
+            ResponseDraft.objects.for_tenant(tenant_id).filter(office_action__tenant_id=tenant_id, office_action__patent__tenant_id=tenant_id).select_related("office_action", "office_action__patent", "created_by"),
             pk=draft_id,
         )
+        require_matter_access(request=request, matter_type="office_action", matter_id=draft.office_action_id, required="READ")
+        require_matter_access(request=request, matter_type="patent", matter_id=draft.office_action.patent_id, required="READ")
+        return draft
 
 
 def _annotated_actions(tenant_id):
@@ -161,6 +168,8 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
     def get(self, request: Request) -> Response:
         tenant_id = self.tenant(request).pk
         queryset = _annotated_actions(tenant_id)
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="office_action")
+        queryset = filter_visible_matter_queryset(queryset, tenant=self.tenant(request), user=request.user, matter_type="patent", id_field="patent_id")
         patent_id = request.query_params.get("patent_id")
         if patent_id:
             try:
@@ -186,6 +195,7 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
         patent = get_object_or_404(Patent.objects.for_tenant(tenant.pk), pk=values["patent_id"])
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="EDIT")
         if patent.tenant_id != tenant.pk:
             raise NotFound("Patent not found in this tenant.")
         upload = values["file"]
@@ -217,7 +227,7 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
                 )
                 AuditLog.objects.create(
                     tenant=tenant,
-                    actor_user_id=request.user.pk,
+                    actor_user_id=request.user.id if getattr(request.user, "is_authenticated", False) else None,
                     action="OFFICE_ACTION_UPLOADED",
                     resource_type="OfficeAction",
                     resource_id=office_action.pk,
@@ -266,6 +276,7 @@ class OfficeActionProcessView(TenantOfficeActionAPIView):
 
     def post(self, request: Request, action_id) -> Response:
         action = self.action(request, action_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=action.pk, required="EDIT")
         task_id = _enqueue_office_action(action, request.user)
         if not task_id:
             return Response({"detail": "Processing could not be queued. The upload remains stored; retry when the worker broker is available."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -283,6 +294,7 @@ class OfficeActionDraftListGenerateView(TenantOfficeActionAPIView):
         if not role_permission.has_permission(request, self):
             raise PermissionDenied("Your tenant role cannot generate response drafts.")
         action = self.action(request, action_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=action.pk, required="EDIT")
         try:
             draft, _revision = create_evidence_grounded_draft(action, request.user)
         except ValueError as exc:
@@ -301,6 +313,7 @@ class ResponseDraftSubmitForReviewView(TenantOfficeActionAPIView):
 
     def post(self, request: Request, draft_id) -> Response:
         draft = self.draft(request, draft_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=draft.office_action_id, required="REVIEW")
         if draft.status == ResponseDraft.Status.WITHDRAWN:
             raise ValidationError("Withdrawn drafts cannot be submitted for review.")
         if draft.current_revision_number <= 0 or not draft.revisions.filter(revision_number=draft.current_revision_number).exists():
@@ -309,7 +322,7 @@ class ResponseDraftSubmitForReviewView(TenantOfficeActionAPIView):
         draft.save(update_fields=("status", "updated_at"))
         AuditLog.objects.create(
             tenant_id=draft.tenant_id,
-            actor_user_id=request.user.pk,
+            actor_user_id=request.user.id if getattr(request.user, "is_authenticated", False) else None,
             action="OFFICE_ACTION_DRAFT_SUBMITTED_FOR_REVIEW",
             resource_type="ResponseDraft",
             resource_id=draft.pk,
@@ -329,6 +342,7 @@ class ResponseDraftRevisionListCreateView(TenantOfficeActionAPIView):
         if not role_permission.has_permission(request, self):
             raise PermissionDenied("Only an attorney or tenant administrator may edit a response draft.")
         draft = self.draft(request, draft_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=draft.office_action_id, required="EDIT")
         if draft.status == ResponseDraft.Status.WITHDRAWN:
             raise ValidationError("Withdrawn drafts cannot be revised.")
         serializer = CreateRevisionSerializer(data=request.data)
@@ -346,6 +360,7 @@ class ResponseDraftReviewView(TenantOfficeActionAPIView):
             ResponseDraftRevision.objects.for_tenant(tenant_id).filter(draft__tenant_id=tenant_id, draft__office_action__tenant_id=tenant_id, draft__office_action__patent__tenant_id=tenant_id).select_related("draft"),
             pk=revision_id,
         )
+        require_matter_access(request=request, matter_type="office_action", matter_id=revision.draft.office_action_id, required="REVIEW")
         serializer = ReviewDecisionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         decision = serializer.validated_data["decision"]
@@ -369,12 +384,13 @@ class AmendmentSupportView(TenantOfficeActionAPIView):
 
     def post(self, request: Request, action_id) -> Response:
         action = self.action(request, action_id)
+        require_matter_access(request=request, matter_type="office_action", matter_id=action.pk, required="EDIT")
         serializer = AmendmentSupportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         support_check = check_amendment_support(action, serializer.validated_data["claim_number"], serializer.validated_data["proposed_claim_text"], request.user)
         AuditLog.objects.create(
             tenant_id=action.tenant_id,
-            actor_user_id=request.user.pk,
+            actor_user_id=request.user.id if getattr(request.user, "is_authenticated", False) else None,
             action="OFFICE_ACTION_AMENDMENT_SUPPORT_CHECKED",
             resource_type="AmendmentSupportCheck",
             resource_id=support_check.pk,
@@ -389,7 +405,10 @@ class ProsecutionHistoryView(TenantOfficeActionAPIView):
         if not patent_id:
             raise ValidationError({"patent_id": "patent_id is required."})
         patent = get_object_or_404(Patent.objects.for_tenant(self.tenant(request).pk), pk=patent_id)
-        actions = _annotated_actions(self.tenant(request).pk).filter(patent=patent).prefetch_related(Prefetch("rejections", queryset=Rejection.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)), Prefetch("cited_references", queryset=CitedReference.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)), Prefetch("drafts", queryset=ResponseDraft.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)))
+        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="READ")
+        actions = _annotated_actions(self.tenant(request).pk).filter(patent=patent)
+        actions = filter_visible_matter_queryset(actions, tenant=self.tenant(request), user=request.user, matter_type="office_action")
+        actions = actions.prefetch_related(Prefetch("rejections", queryset=Rejection.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)), Prefetch("cited_references", queryset=CitedReference.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)), Prefetch("drafts", queryset=ResponseDraft.objects.for_tenant(self.tenant(request).pk).filter(office_action__tenant_id=self.tenant(request).pk)))
         results = []
         for action in actions:
             item = OfficeActionListSerializer(action).data
