@@ -116,6 +116,7 @@ INSTALLED_APPS = [
     "office_actions.apps.OfficeActionsConfig",
     "multilingual_search.apps.MultilingualSearchConfig",
     "fto.apps.FTOConfig",
+    "landscapes.apps.LandscapesConfig",
 ]
 
 MIDDLEWARE = [

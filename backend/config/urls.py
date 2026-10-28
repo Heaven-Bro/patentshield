@@ -18,6 +18,7 @@ urlpatterns = [
     path("api/v1/office-actions/", include("office_actions.urls")),
     path("api/v1/multilingual-search/", include("multilingual_search.urls")),
     path("api/v1/fto/", include("fto.urls")),
+    path("api/v1/landscapes/", include("landscapes.urls")),
 ]
 
 if settings.DEBUG:
