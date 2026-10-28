@@ -19,7 +19,7 @@ app.conf.update(
         Queue("external_search", routing_key="external_search"),
         Queue("exports", routing_key="exports"),
     ),
-    imports=("reports.claim_chart_tasks",),
+    imports=("reports.claim_chart_tasks", "patents.surveillance_tasks"),
     task_routes={
         "ingestion.tasks.*": {"queue": "ingestion"},
         "indexing.tasks.extract_and_index_schematics": {"queue": "ingestion"},
@@ -29,6 +29,7 @@ app.conf.update(
         "retrieval.tasks.*": {"queue": "external_search"},
         "reports.tasks.generate_analysis_report": {"queue": "exports"},
         "reports.claim_chart_tasks.*": {"queue": "exports"},
+        "patents.surveillance_tasks.*": {"queue": "external_search"},
     },
     task_default_queue="ingestion",
     task_default_routing_key="ingestion",
@@ -41,6 +42,20 @@ app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    beat_schedule={
+        # Both are opt-in via PATENTSHIELD_SURVEILLANCE_ENABLED. Jobs use
+        # database checkpoints, so duplicate scheduler dispatch is harmless.
+        "surveillance-enqueue-due-watchlists": {
+            "task": "patents.surveillance_tasks.enqueue_due_watchlists",
+            "schedule": 300.0,
+            "options": {"queue": "external_search"},
+        },
+        "surveillance-recover-deliveries": {
+            "task": "patents.surveillance_tasks.recover_pending_deliveries",
+            "schedule": 60.0,
+            "options": {"queue": "external_search"},
+        },
+    },
 )
 
 app.autodiscover_tasks()
