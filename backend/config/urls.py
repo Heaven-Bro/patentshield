@@ -19,6 +19,7 @@ urlpatterns = [
     path("api/v1/multilingual-search/", include("multilingual_search.urls")),
     path("api/v1/fto/", include("fto.urls")),
     path("api/v1/landscapes/", include("landscapes.urls")),
+    path("api/v1/enterprise-auth/", include("enterprise_identity.urls")),
 ]
 
 if settings.DEBUG:

@@ -117,6 +117,7 @@ INSTALLED_APPS = [
     "multilingual_search.apps.MultilingualSearchConfig",
     "fto.apps.FTOConfig",
     "landscapes.apps.LandscapesConfig",
+    "enterprise_identity.apps.EnterpriseIdentityConfig",
 ]
 
 MIDDLEWARE = [
@@ -126,6 +127,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "enterprise_identity.middleware.ManagedSessionTrackingMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "audit.middleware.AuditLoggingMiddleware",
@@ -407,6 +409,31 @@ if PATENTSHIELD_TRANSLATION_ENABLED:
             "is empty; explicitly authorize the tenants permitted to disclose "
             "selected patent text to the translation service."
         )
+
+# Phase 8 — enterprise identity integrations. Federation stays fail-closed until
+# a tenant owner configures and explicitly enables an identity provider.
+PATENTSHIELD_ENTERPRISE_ENCRYPTION_KEY = os.getenv(
+    "PATENTSHIELD_ENTERPRISE_ENCRYPTION_KEY", ""
+).strip()
+PATENTSHIELD_OIDC_CALLBACK_URL = os.getenv(
+    "PATENTSHIELD_OIDC_CALLBACK_URL", ""
+).strip()
+PATENTSHIELD_SAML_ACS_BASE_URL = os.getenv(
+    "PATENTSHIELD_SAML_ACS_BASE_URL", ""
+).strip().rstrip("/")
+PATENTSHIELD_SAML_METADATA_BASE_URL = os.getenv(
+    "PATENTSHIELD_SAML_METADATA_BASE_URL", ""
+).strip().rstrip("/")
+PATENTSHIELD_SSO_SUCCESS_URL = os.getenv(
+    "PATENTSHIELD_SSO_SUCCESS_URL", "/"
+).strip() or "/"
+PATENTSHIELD_SCIM_MAX_PAGE_SIZE = int(
+    os.getenv("PATENTSHIELD_SCIM_MAX_PAGE_SIZE", "100")
+)
+if not 1 <= PATENTSHIELD_SCIM_MAX_PAGE_SIZE <= 100:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_SCIM_MAX_PAGE_SIZE must be between 1 and 100."
+    )
 
 PATENTSHIELD_MAX_PDF_UPLOAD_BYTES = int(
     os.getenv("PATENTSHIELD_MAX_PDF_UPLOAD_BYTES", str(100 * 1024 * 1024))
