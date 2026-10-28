@@ -18,6 +18,10 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from enterprise_identity.models import ManagedSession
+from enterprise_identity.services import register_managed_session, session_key_hash
+from django.utils import timezone
+
 
 def _serialize_user(user: Any) -> dict[str, Any]:
     """Return the minimal browser profile needed by the authenticated shell."""
@@ -83,6 +87,7 @@ class SessionLoginView(APIView):
         # Django rotates the CSRF secret when establishing a new session.
         auth_login(request._request, user)
         request._request.session.set_expiry(None)
+        register_managed_session(request._request, user, auth_source="PASSWORD")
         return Response(
             {
                 "user": _serialize_user(user),
@@ -121,6 +126,11 @@ class SessionLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request: Request) -> Response:
+        session_key = request._request.session.session_key
+        if session_key:
+            ManagedSession.objects.filter(
+                session_key_hash=session_key_hash(session_key), revoked_at__isnull=True
+            ).update(revoked_at=timezone.now(), revoked_by=request.user)
         auth_logout(request._request)
         return Response(
             {
