@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import threading
 from collections.abc import Iterable
 from typing import Any
@@ -15,12 +14,12 @@ from django.conf import settings
 from pgvector.django import CosineDistance
 
 from indexing.models import TextChunk
+from indexing.language import tokenize_original_language
 from indexing.services import BGEEmbedder, BM25LexicalIndex
 from retrieval.schemas import RetrievedCandidate
 
 logger = logging.getLogger(__name__)
 
-_TOKEN_PATTERN = re.compile(r"[\w]+", flags=re.UNICODE)
 
 
 class DenseRetriever:
@@ -84,6 +83,7 @@ class DenseRetriever:
                     section_type=chunk.section_type,
                     claim_number=chunk.claim_number,
                     text=chunk.text,
+                    language_code=getattr(chunk, "language_code", "und"),
                     dense_score=1.0 - distance,
                     page_start=chunk.page_start,
                     page_end=chunk.page_end,
@@ -315,10 +315,10 @@ class CrossEncoderReranker:
     @staticmethod
     def _mock_score(query: str, text: str) -> float:
         """Return deterministic token coverage for development-only ranking."""
-        query_tokens = set(_TOKEN_PATTERN.findall(query.casefold()))
+        query_tokens = set(tokenize_original_language(query))
         if not query_tokens:
             return 0.0
-        text_tokens = set(_TOKEN_PATTERN.findall(text.casefold()))
+        text_tokens = set(tokenize_original_language(text))
         coverage = len(query_tokens & text_tokens) / len(query_tokens)
         phrase_bonus = 0.1 if query.casefold().strip() in text.casefold() else 0.0
         return min(1.0, coverage + phrase_bonus)
@@ -454,6 +454,7 @@ class HybridSearchPipeline:
                     section_type=chunk.section_type,
                     claim_number=chunk.claim_number,
                     text=chunk.text,
+                    language_code=getattr(chunk, "language_code", "und"),
                     lexical_score=float(hit["score"]),
                     page_start=chunk.page_start,
                     page_end=chunk.page_end,

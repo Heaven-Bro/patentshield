@@ -15,6 +15,7 @@ class RetrievedCandidate(BaseModel):
     section_type: str
     claim_number: str | None = None
     text: str
+    language_code: str = "und"
     dense_score: float = 0.0
     lexical_score: float = 0.0
     rrf_score: float = 0.0
