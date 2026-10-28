@@ -10,7 +10,7 @@ ARG INSTALL_ML_DEPS=0
 ARG INSTALL_DEV_DEPS=0
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y build-essential libpq-dev \
+    && apt-get install --no-install-recommends -y build-essential libpq-dev pkg-config libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
