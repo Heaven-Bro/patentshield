@@ -21,9 +21,6 @@ REPOSITORY_ROOT = BASE_DIR.parent
 load_dotenv(REPOSITORY_ROOT / ".env", override=False)
 load_dotenv(BASE_DIR / ".env", override=False)
 
-STATIC_URL = "/static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -143,7 +140,6 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -367,6 +363,9 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
+    "DEFAULT_THROTTLE_RATES": {
+        "login": os.getenv("PATENTSHIELD_LOGIN_RATE", "10/min"),
+    },
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -561,6 +560,7 @@ if PATENTSHIELD_FTO_MAX_UPLOAD_BYTES <= 0 or PATENTSHIELD_FTO_MAX_UPLOAD_BYTES >
     raise ImproperlyConfigured(
         "PATENTSHIELD_FTO_MAX_UPLOAD_BYTES must be positive and no greater than PATENTSHIELD_MAX_PDF_UPLOAD_BYTES."
     )
+# Startup preflight: mock embeddings are never a valid production runtime.
 if not DEBUG and PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS:
     raise ImproperlyConfigured(
         "Mock embeddings must be disabled when DJANGO_DEBUG=False."
