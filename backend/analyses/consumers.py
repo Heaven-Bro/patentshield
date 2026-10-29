@@ -10,6 +10,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 from analyses.models import AnalysisReport
+from enterprise_identity.services import matter_access_allowed
 from tenants.models import Tenant, TenantMembership
 
 logger = logging.getLogger(__name__)
@@ -170,10 +171,26 @@ class AnalysisProgressConsumer(AsyncJsonWebsocketConsumer):
         ):
             return None
 
-        membership_is_active = TenantMembership.objects.filter(
-            tenant_id=report.tenant_id,
-            tenant__status=Tenant.Status.ACTIVE,
-            user_id=user_id,
-            status=TenantMembership.Status.ACTIVE,
-        ).exists()
-        return str(report.tenant_id) if membership_is_active else None
+        membership = (
+            TenantMembership.objects.select_related("tenant", "user")
+            .filter(
+                tenant_id=report.tenant_id,
+                tenant__status=Tenant.Status.ACTIVE,
+                user_id=user_id,
+                status=TenantMembership.Status.ACTIVE,
+            )
+            .first()
+        )
+        if membership is None:
+            return None
+        # Match the HTTP authorization boundary: tenant membership alone does
+        # not grant access to a matter whose explicit ACL is enforced.
+        if not matter_access_allowed(
+            tenant=membership.tenant,
+            user=membership.user,
+            matter_type="analysis",
+            matter_id=report.pk,
+            required="READ",
+        ):
+            return None
+        return str(report.tenant_id)
