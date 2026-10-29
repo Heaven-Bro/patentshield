@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
@@ -254,6 +254,11 @@ class SurveillanceTestCase(TestCase):
         with self.assertRaises(UnsafeWebhookDestination):
             validate_webhook_url("https://127.0.0.1/webhook")
 
+    @override_settings(PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=[])
+    def test_webhook_policy_rejects_empty_allowlist(self):
+        with self.assertRaises(UnsafeWebhookDestination):
+            validate_webhook_url("https://hooks.slack.com/services/test")
+
     @override_settings(PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=["hooks.example.org"])
     @patch("patents.surveillance_services.socket.getaddrinfo")
     def test_webhook_policy_rejects_dns_resolving_to_private_ip(self, getaddrinfo):
@@ -342,9 +347,14 @@ class SurveillanceTestCase(TestCase):
             next_attempt_at=timezone.now(),
         )
         response = Mock(status_code=200)
+        session = Mock()
+        session.post.return_value = response
+        session_context = MagicMock()
+        session_context.__enter__.return_value = session
+        session_context.__exit__.return_value = False
         with patch("patents.surveillance_tasks.validate_webhook_url", return_value="https://hooks.slack.com/services/test/secret/token"), patch(
-            "patents.surveillance_tasks.requests.post", return_value=response
-        ) as post:
+            "patents.surveillance_tasks.requests.Session", return_value=session_context
+        ) as session_factory:
             result = deliver_alert.apply(args=(str(delivery.pk),), throw=True).get()
             duplicate_result = deliver_alert.apply(args=(str(delivery.pk),), throw=True).get()
         delivery.refresh_from_db()
@@ -354,8 +364,9 @@ class SurveillanceTestCase(TestCase):
         self.assertEqual(delivery.last_http_status, 200)
         self.assertEqual(AlertDeliveryAttempt.objects.filter(delivery=delivery).count(), 1)
         self.assertEqual(duplicate_result["status"], AlertDelivery.Status.DELIVERED)
-        self.assertEqual(post.call_count, 1)
-        self.assertNotIn("secret/token", str(post.call_args.kwargs.get("json", {})))
+        self.assertEqual(session.post.call_count, 1)
+        self.assertFalse(session.trust_env)
+        self.assertNotIn("secret/token", str(session.post.call_args.kwargs.get("json", {})))
 
     @override_settings(
         PATENTSHIELD_SURVEILLANCE_ENABLED=True,

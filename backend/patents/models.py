@@ -97,6 +97,7 @@ class PatentDocumentVersion(TenantScopedModel):
         choices=ExtractionStatus.choices,
         default=ExtractionStatus.PENDING,
     )
+    extraction_started_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

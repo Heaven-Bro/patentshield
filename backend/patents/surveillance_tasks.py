@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlsplit
 from datetime import timedelta
 from typing import Any
 
@@ -402,6 +403,19 @@ def _send_delivery(delivery: AlertDelivery) -> tuple[int | None, str]:
 
     try:
         webhook_url = decrypt_webhook_secret(destination)
+        # Fail closed at dispatch as well as at destination creation/update. This
+        # protects against configuration drift and an accidentally empty allowlist.
+        configured_hosts = getattr(settings, "PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS", ())
+        if isinstance(configured_hosts, str):
+            allowed_hosts = {item.strip().rstrip(".").casefold() for item in configured_hosts.split(",") if item.strip()}
+        else:
+            allowed_hosts = {str(item).strip().rstrip(".").casefold() for item in (configured_hosts or ()) if str(item).strip()}
+        try:
+            requested_host = (urlsplit(webhook_url).hostname or "").rstrip(".").casefold()
+        except ValueError as exc:
+            raise UnsafeWebhookDestination("Invalid webhook URL.") from exc
+        if not allowed_hosts or not requested_host or requested_host not in allowed_hosts:
+            raise UnsafeWebhookDestination("Webhook hostname is not explicitly allowlisted.")
         validate_webhook_url(webhook_url, resolve_dns=True)
     except UnsafeWebhookDestination as exc:
         logger.warning("Surveillance webhook blocked by destination policy (%s).", type(exc).__name__)
@@ -433,13 +447,18 @@ def _send_delivery(delivery: AlertDelivery) -> tuple[int | None, str]:
         }
 
     try:
-        response = requests.post(
-            webhook_url,
-            json=payload,
-            timeout=(3.05, 8.0),
-            allow_redirects=False,
-            headers={"User-Agent": "PatentShield-Surveillance/1.0"},
-        )
+        # Do not inherit HTTP(S)_PROXY/ALL_PROXY environment settings for a
+        # security-sensitive outbound webhook request. Deployment egress policy
+        # remains the final defense against DNS-rebinding TOCTOU races.
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(
+                webhook_url,
+                json=payload,
+                timeout=(3.05, 8.0),
+                allow_redirects=False,
+                headers={"User-Agent": "PatentShield-Surveillance/1.0"},
+            )
     except requests.RequestException as exc:
         logger.warning("Surveillance webhook request failed (%s).", type(exc).__name__)
         raise _DeliveryFailure("WEBHOOK_NETWORK_ERROR", retryable=True) from exc
