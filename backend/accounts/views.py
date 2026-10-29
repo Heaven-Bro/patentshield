@@ -18,6 +18,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.throttles import LoginRateThrottle
 from enterprise_identity.models import ManagedSession
 from enterprise_identity.services import register_managed_session, session_key_hash
 from django.utils import timezone
@@ -66,6 +67,7 @@ class SessionLoginView(APIView):
 
     authentication_classes: list[type] = []
     permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
     def post(self, request: Request) -> Response:
         serializer = LoginRequestSerializer(data=request.data)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -136,3 +137,35 @@ class SessionAuthenticationApiTests(TestCase):
     def test_authenticated_session_endpoint_returns_401_after_logout(self) -> None:
         response = self.client.get(reverse("accounts:me"))
         self.assertEqual(response.status_code, 401)
+
+    def test_login_is_throttled_after_ten_attempts_per_minute(self) -> None:
+        cache.clear()
+        csrf_token = self._get_csrf_token()
+        for _ in range(10):
+            response = self.client.post(
+                reverse("accounts:login"),
+                data={"username": self.user.get_username(), "password": "incorrect"},
+                content_type="application/json",
+                HTTP_X_CSRFTOKEN=csrf_token,
+                REMOTE_ADDR="198.51.100.45",
+            )
+            self.assertEqual(response.status_code, 401, response.content)
+        limited = self.client.post(
+            reverse("accounts:login"),
+            data={"username": self.user.get_username(), "password": "incorrect"},
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+            REMOTE_ADDR="198.51.100.45",
+        )
+        self.assertEqual(limited.status_code, 429, limited.content)
+        cache.clear()
+
+
+class LoginThrottleConfigurationTests(TestCase):
+    def test_login_endpoint_declares_the_custom_rate_throttle(self):
+        from accounts.throttles import LoginRateThrottle
+        from accounts.views import SessionLoginView
+        from django.conf import settings
+
+        self.assertIn(LoginRateThrottle, SessionLoginView.throttle_classes)
+        self.assertEqual(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["login"], "10/min")
