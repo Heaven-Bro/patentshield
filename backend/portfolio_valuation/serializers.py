@@ -200,12 +200,18 @@ def revision_payload(revision):
     }
 
 
-def scenario_payload(scenario):
-    latest = scenario.revisions.filter(tenant_id=scenario.tenant_id).order_by("-revision_number").first()
+def scenario_payload(scenario, current_manifest=None):
+    """Serialize a scenario while honoring an optional one-query latest-revision prefetch."""
+    prefetched = getattr(scenario, "prefetched_latest_revisions", None)
+    latest = prefetched[0] if prefetched else None
+    if prefetched is None:
+        latest = scenario.revisions.filter(tenant_id=scenario.tenant_id).order_by("-revision_number").first()
     payload = revision_payload(latest) if latest else None
     if payload is not None:
-        payload["is_current_for_current_assets"] = latest.asset_manifest_sha256 == current_asset_manifest(scenario.study)
-        payload["current_asset_manifest_sha256"] = current_asset_manifest(scenario.study)
+        if current_manifest is None:
+            current_manifest = current_asset_manifest(scenario.study)
+        payload["is_current_for_current_assets"] = latest.asset_manifest_sha256 == current_manifest
+        payload["current_asset_manifest_sha256"] = current_manifest
     return {
         "id": str(scenario.pk), "name": scenario.name, "description": scenario.description,
         "method": scenario.method, "latest_revision": payload,

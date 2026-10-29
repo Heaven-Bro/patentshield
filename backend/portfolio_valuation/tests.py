@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
@@ -82,6 +84,43 @@ class PortfolioValuationTenantTests(TestCase):
         client.force_authenticate(self.user)
         response = client.get(f"/api/v1/valuation/studies/{self.study.pk}/", HTTP_X_TENANT_ID=str(self.tenant_b.pk))
         self.assertEqual(response.status_code, 404)
+
+    def test_portfolio_valuation_study_is_registered_for_matter_acl(self):
+        from enterprise_identity.services import resolve_matter
+
+        resolved = resolve_matter(self.tenant_a, "portfolio_valuation", self.study.pk)
+        self.assertEqual(resolved.pk, self.study.pk)
+        self.assertEqual(resolved.__class__, PortfolioValuationStudy)
+
+    def test_asset_selection_batches_source_snapshot_and_legal_event_queries(self):
+        from patents.intelligence_models import PatentLegalEvent, PatentSourceSnapshot
+
+        publications = [
+            PatentPublication.objects.create(
+                provider=PatentPublication.Provider.USPTO,
+                provider_record_id=f"valuation-batch-{index}",
+                publication_number=f"US-BATCH-{index}",
+                jurisdiction="US",
+                title=f"Batch publication {index}",
+                legal_status=PatentPublication.LegalStatus.UNKNOWN,
+            )
+            for index in range(3)
+        ]
+        client = APIClient()
+        client.force_authenticate(self.user)
+        with CaptureQueriesContext(connection) as captured:
+            response = client.post(
+                f"/api/v1/valuation/studies/{self.study.pk}/assets/",
+                {"publication_ids": [str(item.pk) for item in publications]},
+                format="json",
+                HTTP_X_TENANT_ID=str(self.tenant_a.pk),
+            )
+        self.assertEqual(response.status_code, 201, response.data)
+        sql = [item["sql"].casefold() for item in captured.captured_queries]
+        snapshot_table = PatentSourceSnapshot._meta.db_table.casefold()
+        event_table = PatentLegalEvent._meta.db_table.casefold()
+        self.assertEqual(sum(snapshot_table in statement for statement in sql), 1)
+        self.assertEqual(sum(event_table in statement for statement in sql), 2)
 
     def test_provider_omission_does_not_become_zero_citations(self):
         publication = PatentPublication.objects.create(

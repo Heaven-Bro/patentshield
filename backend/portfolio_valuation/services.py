@@ -74,29 +74,47 @@ def _provider_citations(publication: PatentPublication, source_snapshot: PatentS
     return result["forward_citation_count"], result["backward_citation_count"], evidence
 
 
+def _event_payload(event: PatentLegalEvent | None) -> dict[str, Any]:
+    if event is None:
+        return {}
+    return {
+        "event_id": str(event.pk),
+        "event_code": event.event_code,
+        "title": event.title,
+        "event_date": event.event_date.isoformat() if event.event_date else None,
+        "provider": event.provider,
+        "source_url": event.source_url,
+        "source_payload_hash": event.source_payload_hash,
+        "legal_status_after": event.legal_status_after,
+    }
+
+
 def _latest_legal_event(publication: PatentPublication) -> tuple[int, dict[str, Any]]:
-    qs = PatentLegalEvent.objects.filter(publication=publication).order_by(F("event_date").desc(nulls_last=True), "-observed_at")
-    event = qs.first()
-    payload: dict[str, Any] = {}
-    if event:
-        payload = {
-            "event_id": str(event.pk),
-            "event_code": event.event_code,
-            "title": event.title,
-            "event_date": event.event_date.isoformat() if event.event_date else None,
-            "provider": event.provider,
-            "source_url": event.source_url,
-            "source_payload_hash": event.source_payload_hash,
-            "legal_status_after": event.legal_status_after,
-        }
-    return qs.count(), payload
+    """Fallback helper for call sites without a preloaded publication batch."""
+    qs = PatentLegalEvent.objects.filter(publication=publication)
+    event_count = qs.count()
+    event = qs.order_by(F("event_date").desc(nulls_last=True), "-observed_at").first() if event_count else None
+    return event_count, _event_payload(event)
 
 
-def add_publication_to_study(study: PortfolioValuationStudy, publication: PatentPublication) -> tuple[PortfolioAssetSnapshot, bool]:
-    """Pin canonical bibliographic, status, citation, and event evidence atomically."""
-    source_snapshot = PatentSourceSnapshot.objects.filter(publication=publication).order_by("-fetched_at").first()
+def add_publication_to_study(
+    study: PortfolioValuationStudy,
+    publication: PatentPublication,
+    *,
+    source_snapshot: PatentSourceSnapshot | None = None,
+    source_snapshot_prefetched: bool = False,
+    legal_event_count: int | None = None,
+    prefetched_latest_event: PatentLegalEvent | None = None,
+) -> tuple[PortfolioAssetSnapshot, bool]:
+    """Pin evidence; callers can supply batched source/event lookups to avoid N+1 queries."""
+    if not source_snapshot_prefetched:
+        source_snapshot = PatentSourceSnapshot.objects.filter(publication=publication).order_by("-fetched_at").first()
     forward, backward, citation_provenance = _provider_citations(publication, source_snapshot)
-    event_count, latest_event = _latest_legal_event(publication)
+    if legal_event_count is None:
+        event_count, latest_event = _latest_legal_event(publication)
+    else:
+        event_count = legal_event_count
+        latest_event = _event_payload(prefetched_latest_event)
     snapshot = {
         "publication_id": str(publication.pk),
         "provider": publication.provider,

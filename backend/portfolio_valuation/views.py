@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from django.db import IntegrityError, transaction
+from django.db.models import Count, F, Prefetch
 from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import JSONParser
@@ -12,7 +13,7 @@ from rest_framework.views import APIView
 
 from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from landscapes.models import LandscapeStudy
-from patents.intelligence_models import PatentPublication
+from patents.intelligence_models import PatentLegalEvent, PatentPublication, PatentSourceSnapshot
 from portfolio_valuation.models import (
     PortfolioAnnotation,
     PortfolioAssetSnapshot,
@@ -148,8 +149,35 @@ class StudyAssetsView(ValuationAPIView):
             publications = list(PatentPublication.objects.filter(pk__in=ids).order_by("pk"))
             if len(publications) != len(ids):
                 raise ValidationError({"publication_ids": "One or more publications became unavailable. Refresh and retry."})
+
+            # Batch source snapshots and legal-event aggregates for this selection.
+            # PostgreSQL DISTINCT ON makes the latest row per publication one query.
+            publication_ids = [publication.pk for publication in publications]
+            latest_sources = PatentSourceSnapshot.objects.filter(
+                publication_id__in=publication_ids,
+            ).order_by("publication_id", "-fetched_at").distinct("publication_id")
+            source_by_publication = {row.publication_id: row for row in latest_sources}
+            event_counts = dict(
+                PatentLegalEvent.objects.filter(publication_id__in=publication_ids)
+                .values("publication_id")
+                .annotate(total=Count("pk"))
+                .values_list("publication_id", "total")
+            )
+            latest_events = PatentLegalEvent.objects.filter(
+                publication_id__in=publication_ids,
+            ).order_by(
+                "publication_id", F("event_date").desc(nulls_last=True), "-observed_at",
+            ).distinct("publication_id")
+            latest_event_by_publication = {row.publication_id: row for row in latest_events}
             for publication in publications:
-                _row, was_created = add_publication_to_study(locked_study, publication)
+                _row, was_created = add_publication_to_study(
+                    locked_study,
+                    publication,
+                    source_snapshot=source_by_publication.get(publication.pk),
+                    source_snapshot_prefetched=True,
+                    legal_event_count=event_counts.get(publication.pk, 0),
+                    prefetched_latest_event=latest_event_by_publication.get(publication.pk),
+                )
                 created += int(was_created)
             if created and locked_study.status == PortfolioValuationStudy.Status.READY:
                 # Adding assets invalidates the ready state; it must be re-reviewed.
@@ -178,8 +206,15 @@ class StudyDiligenceView(ValuationAPIView):
 class StudyScenariosView(ValuationAPIView):
     def get(self, request: Request, study_id: str) -> Response:
         study = self.get_study(request, study_id)
-        rows = PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).select_related("created_by").prefetch_related("revisions").order_by("name")
-        return Response({"count": rows.count(), "results": [scenario_payload(row) for row in rows]})
+        latest_revision = Prefetch(
+            "revisions",
+            queryset=PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id).order_by("-revision_number")[:1],
+            to_attr="prefetched_latest_revisions",
+        )
+        rows = PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).select_related("created_by", "study").prefetch_related(latest_revision).order_by("name")
+        count = rows.count()
+        current_manifest = current_asset_manifest(study)
+        return Response({"count": count, "results": [scenario_payload(row, current_manifest=current_manifest) for row in rows]})
 
     def post(self, request: Request, study_id: str) -> Response:
         self.require_role(request, _EDITOR_ROLES)
@@ -249,11 +284,20 @@ class StudyScenarioSummaryView(ValuationAPIView):
     """Summarize existing scenario outcomes without blending methods into one value."""
     def get(self, request: Request, study_id: str) -> Response:
         study = self.get_study(request, study_id)
-        scenarios = list(PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).order_by("name"))
+        latest_revision = Prefetch(
+            "revisions",
+            queryset=PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id).order_by("-revision_number")[:1],
+            to_attr="prefetched_latest_revisions",
+        )
+        scenarios = list(
+            PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study)
+            .prefetch_related(latest_revision).order_by("name")
+        )
         result = []
         current_manifest = current_asset_manifest(study)
         for scenario in scenarios:
-            revision = PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id, scenario=scenario).order_by("-revision_number").first()
+            prefetched = getattr(scenario, "prefetched_latest_revisions", None)
+            revision = prefetched[0] if prefetched else None
             if revision:
                 result.append({"scenario_id": str(scenario.pk), "scenario_name": scenario.name, "method": scenario.method, "currency": revision.currency, "indicated_value": revision.calculated_result.get("indicated_value"), "revision": revision.revision_number, "input_sha256": revision.input_sha256, "asset_manifest_sha256": revision.asset_manifest_sha256, "is_current_for_current_assets": revision.asset_manifest_sha256 == current_manifest})
         return Response({"study_id": str(study.pk), "currency": study.currency, "current_asset_manifest_sha256": current_manifest, "results": result, "interpretation": "Each outcome is a separate assumption-driven scenario. Do not average these methods or treat the spread as a statistical confidence interval."})
