@@ -49,6 +49,7 @@ class EnterpriseUrlSafetyTests(SimpleTestCase):
         self.assertFalse(_https_url("http://localhost:9000/metadata", allow_localhost=False))
         self.assertFalse(_https_url("http://169.254.169.254/latest/meta-data", allow_localhost=True))
 
+    @override_settings(PATENTSHIELD_IDP_ALLOWED_HOSTS="idp.example.com")
     @patch("enterprise_identity.services.socket.getaddrinfo")
     def test_oidc_endpoints_reject_private_network_addresses(self, getaddrinfo):
         getaddrinfo.return_value = [(None, None, None, None, ("10.20.30.40", 443))]
@@ -82,7 +83,6 @@ class EnterpriseIdentitySecurityTests(TestCase):
         TenantMembership.objects.create(tenant=self.tenant, user=self.user, role=TenantMembership.Role.ADMIN)
         TenantMembership.objects.create(tenant=self.tenant, user=self.member, role=TenantMembership.Role.ANALYST)
         self.matter_id = uuid.uuid4()
-
 
     def test_enabled_oidc_requires_configured_client_secret(self):
         serializer = IdentityProviderSerializer(data={
@@ -210,6 +210,7 @@ class EnterpriseIdentitySecurityTests(TestCase):
         stored = ManagedSession.objects.get(session_key_hash=digest)
         self.assertFalse(hasattr(stored, "session_key"))
 
+
 class ManagedSessionMiddlewareTests(TestCase):
     def test_revoked_session_is_logged_out_before_view_dispatch(self):
         user = User.objects.create_user(username="session-user", password="Session-password-42!")
@@ -230,4 +231,3 @@ class ManagedSessionMiddlewareTests(TestCase):
         response = middleware(request)
         self.assertEqual(response.content, b"anonymous")
         self.assertIsNone(request.session.session_key)
-

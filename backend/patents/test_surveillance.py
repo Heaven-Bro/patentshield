@@ -372,6 +372,7 @@ class SurveillanceTestCase(TestCase):
         PATENTSHIELD_SURVEILLANCE_ENABLED=True,
         PATENTSHIELD_SURVEILLANCE_ENCRYPTION_KEY=Fernet.generate_key().decode("ascii"),
         PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=["hooks.slack.com"],
+        PATENTSHIELD_SURVEILLANCE_MAX_DELIVERY_ATTEMPTS=6,
     )
     def test_retryable_webhook_failure_is_persisted_with_backoff(self):
         from patents.surveillance_tasks import deliver_alert
@@ -405,10 +406,17 @@ class SurveillanceTestCase(TestCase):
             next_attempt_at=timezone.now(),
         )
         response = Mock(status_code=503)
+        session = Mock()
+        session.post.return_value = response
+        session_context = MagicMock()
+        session_context.__enter__.return_value = session
+        session_context.__exit__.return_value = False
+
         with patch("patents.surveillance_tasks.validate_webhook_url", return_value="https://hooks.slack.com/services/test/secret/token"), patch(
-            "patents.surveillance_tasks.requests.post", return_value=response
+            "patents.surveillance_tasks.requests.Session", return_value=session_context
         ):
             result = deliver_alert.apply(args=(str(delivery.pk),), throw=True).get()
+
         delivery.refresh_from_db()
         attempt = AlertDeliveryAttempt.objects.get(delivery=delivery)
         self.assertEqual(result["status"], AlertDelivery.Status.RETRYING)

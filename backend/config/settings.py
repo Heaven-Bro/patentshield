@@ -5,7 +5,7 @@ must provide a non-placeholder DJANGO_SECRET_KEY and DATABASE_URL/DB credentials
 """
 
 from __future__ import annotations
-
+from corsheaders.defaults import default_headers
 import os
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -140,6 +140,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -342,7 +343,9 @@ CSRF_TRUSTED_ORIGINS = _env_csv(
     "CSRF_TRUSTED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
 )
-
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-tenant-id",
+]
 # Browser sessions are cookie-based; unsafe requests additionally require the
 # CSRF token returned by /api/v1/auth/csrf/. Do not store session IDs in JS.
 SESSION_COOKIE_HTTPONLY = True

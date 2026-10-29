@@ -1,0 +1,20 @@
+--- a/backend/enterprise_identity/tests.py
++++ b/backend/enterprise_identity/tests.py
+@@ -49,6 +49,7 @@
+         self.assertFalse(_https_url("http://localhost:9000/metadata", allow_localhost=False))
+         self.assertFalse(_https_url("http://169.254.169.254/latest/meta-data", allow_localhost=True))
+ 
++    @override_settings(PATENTSHIELD_IDP_ALLOWED_HOSTS=["idp.example.com"])
+     @patch("enterprise_identity.services.socket.getaddrinfo")
+     def test_oidc_endpoints_reject_private_network_addresses(self, getaddrinfo):
+         getaddrinfo.return_value = [(None, None, None, None, ("10.20.30.40", 443))]
+--- a/backend/patents/test_surveillance.py
++++ b/backend/patents/test_surveillance.py
+@@ -372,6 +372,7 @@
+         PATENTSHIELD_SURVEILLANCE_ENABLED=True,
+         PATENTSHIELD_SURVEILLANCE_ENCRYPTION_KEY=Fernet.generate_key().decode("ascii"),
+         PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=["hooks.slack.com"],
++        PATENTSHIELD_SURVEILLANCE_MAX_DELIVERY_ATTEMPTS=6,
+     )
+     def test_retryable_webhook_failure_is_persisted_with_backoff(self):
+         from patents.surveillance_tasks import deliver_alert
