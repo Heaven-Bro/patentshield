@@ -1,0 +1,1858 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -1,7 +1,7 @@
+ # PatentShield environment template. Never commit a populated .env file.
+ # Generate unique secrets locally; do not reuse these placeholder values.
+ DJANGO_SECRET_KEY=replace-with-a-unique-random-secret-at-least-50-characters
+-DJANGO_DEBUG=True
++DJANGO_DEBUG=False
+ ALLOWED_HOSTS=localhost,127.0.0.1,api
+ 
+ # Values here are examples for Docker Compose. Keep DATABASE_URL credentials
+@@ -25,6 +25,7 @@
+ SESSION_COOKIE_SAMESITE=Lax
+ CSRF_COOKIE_SAMESITE=Lax
+ SESSION_EXPIRE_AT_BROWSER_CLOSE=False
++PATENTSHIELD_LOGIN_RATE=10/min
+ 
+ # External disclosure is disabled by default. Enable only after tenant policy
+ # and source licensing have been reviewed. The HMAC key must be independent
+@@ -38,7 +39,7 @@
+ TAVILY_API_KEY=
+ 
+ # Development mock embeddings are forbidden when DJANGO_DEBUG=False.
+-PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS=True
++PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS=False
+ PATENTSHIELD_MAX_PDF_UPLOAD_BYTES=104857600
+ # Phase 6 — product FTO specification upload limit (must not exceed the global PDF cap).
+ PATENTSHIELD_FTO_MAX_UPLOAD_BYTES=31457280
+
+diff --git a/.gitignore b/.gitignore
+--- a/.gitignore
++++ b/.gitignore
+@@ -47,3 +47,6 @@
+ .DS_Store
+ .idea/
+ .vscode/
++
++# Sanitized release candidates created by scripts/release_gate.sh
++/build/
+
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,36 +1,63 @@
+-FROM python:3.12-slim
++# Pin the complete multi-platform manifest by digest. Update this value only
++# through the normal image-update review and vulnerability-scan process.
++ARG PYTHON_BASE=python:3.12.15-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+ 
++FROM ${PYTHON_BASE} AS base
+ ENV PYTHONDONTWRITEBYTECODE=1 \
+     PYTHONUNBUFFERED=1 \
+-    PIP_NO_CACHE_DIR=1
++    PIP_NO_CACHE_DIR=1 \
++    PIP_DISABLE_PIP_VERSION_CHECK=1
+ 
+-WORKDIR /app
+-
++FROM base AS builder
++WORKDIR /build
+ ARG INSTALL_ML_DEPS=0
+ ARG INSTALL_DEV_DEPS=0
+ 
++# Compilers and headers exist only in the build stage.
+ RUN apt-get update \
+-    && apt-get install --no-install-recommends -y build-essential libpq-dev pkg-config libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
++    && apt-get install --no-install-recommends -y \
++        build-essential \
++        libpq-dev \
++        pkg-config \
++        libxml2-dev \
++        libxmlsec1-dev \
++        libxmlsec1-openssl \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ COPY requirements.txt /tmp/requirements.txt
+ COPY requirements-ml.txt /tmp/requirements-ml.txt
+ COPY requirements-dev.txt /tmp/requirements-dev.txt
+-RUN python -m pip install --upgrade pip \
+-    && python -m pip install -r /tmp/requirements.txt \
++RUN python -m venv /opt/venv \
++    && /opt/venv/bin/python -m pip install --upgrade pip \
++    && /opt/venv/bin/python -m pip install -r /tmp/requirements.txt \
+     && if [ "$INSTALL_ML_DEPS" = "1" ]; then \
+-        python -m pip install -r /tmp/requirements-ml.txt; \
++        /opt/venv/bin/python -m pip install -r /tmp/requirements-ml.txt; \
+     fi \
+     && if [ "$INSTALL_DEV_DEPS" = "1" ]; then \
+-        python -m pip install -r /tmp/requirements-dev.txt; \
++        /opt/venv/bin/python -m pip install -r /tmp/requirements-dev.txt; \
+     fi
+ 
+-COPY backend/ /app/
++FROM base AS runtime
++ENV PATH="/opt/venv/bin:$PATH" \
++    VIRTUAL_ENV=/opt/venv
+ 
+-RUN useradd --create-home --shell /usr/sbin/nologin django \
+-    && mkdir -p /app/media /app/staticfiles \
+-    && chown -R django:django /app
++# Runtime contains libraries required by psycopg/xmlsec, but no compiler,
++# development headers, package metadata, or build-essential toolchain.
++RUN apt-get update \
++    && apt-get install --no-install-recommends -y \
++        ca-certificates \
++        libpq5 \
++        libxml2 \
++        libxmlsec1 \
++        libxmlsec1-openssl \
++    && rm -rf /var/lib/apt/lists/* \
++    && useradd --create-home --shell /usr/sbin/nologin django \
++    && install -d -o django -g django /app/media /app/staticfiles
++
++WORKDIR /app
++COPY --from=builder /opt/venv /opt/venv
++COPY --chown=django:django backend/ /app/
++
+ USER django
+-
+ EXPOSE 8000
+ CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
+
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -8,8 +8,9 @@
+       POSTGRES_DB: ${POSTGRES_DB:-patentshield}
+       POSTGRES_USER: ${POSTGRES_USER:-patentshield}
+       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env file}
++    # Local loopback only; production deployments should remove host port publishing.
+     ports:
+-      - "5432:5432"
++      - "127.0.0.1:5432:5432"
+     volumes:
+       - postgres_data:/var/lib/postgresql/data
+     healthcheck:
+@@ -23,8 +24,9 @@
+     image: redis:7-alpine
+     restart: unless-stopped
+     command: ["redis-server", "--appendonly", "yes"]
++    # Local loopback only; production deployments should remove host port publishing.
+     ports:
+-      - "6379:6379"
++      - "127.0.0.1:6379:6379"
+     volumes:
+       - redis_data:/data
+     healthcheck:
+@@ -50,8 +52,9 @@
+       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
+       CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
+     command: ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
++    # Bind only to loopback; production should route through a TLS ingress/proxy.
+     ports:
+-      - "8000:8000"
++      - "127.0.0.1:8000:8000"
+     volumes:
+       - ./backend:/app
+     depends_on:
+
+diff --git a/backend/accounts/views.py b/backend/accounts/views.py
+--- a/backend/accounts/views.py
++++ b/backend/accounts/views.py
+@@ -18,6 +18,7 @@
+ from rest_framework.response import Response
+ from rest_framework.views import APIView
+ 
++from accounts.throttles import LoginRateThrottle
+ from enterprise_identity.models import ManagedSession
+ from enterprise_identity.services import register_managed_session, session_key_hash
+ from django.utils import timezone
+@@ -66,6 +67,7 @@
+ 
+     authentication_classes: list[type] = []
+     permission_classes = [AllowAny]
++    throttle_classes = [LoginRateThrottle]
+ 
+     def post(self, request: Request) -> Response:
+         serializer = LoginRequestSerializer(data=request.data)
+
+diff --git a/backend/accounts/throttles.py b/backend/accounts/throttles.py
+--- /dev/null
++++ b/backend/accounts/throttles.py
+@@ -0,0 +1,8 @@
++"""Rate limits for public account endpoints."""
++from rest_framework.throttling import AnonRateThrottle
++
++
++class LoginRateThrottle(AnonRateThrottle):
++    """Limit unauthenticated password login attempts before authentication work."""
++
++    scope = "login"
+
+diff --git a/backend/accounts/tests.py b/backend/accounts/tests.py
+--- a/backend/accounts/tests.py
++++ b/backend/accounts/tests.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ from django.contrib.auth import get_user_model
++from django.core.cache import cache
+ from django.test import Client, TestCase
+ from django.urls import reverse
+ 
+@@ -136,3 +137,35 @@
+     def test_authenticated_session_endpoint_returns_401_after_logout(self) -> None:
+         response = self.client.get(reverse("accounts:me"))
+         self.assertEqual(response.status_code, 401)
++
++    def test_login_is_throttled_after_ten_attempts_per_minute(self) -> None:
++        cache.clear()
++        csrf_token = self._get_csrf_token()
++        for _ in range(10):
++            response = self.client.post(
++                reverse("accounts:login"),
++                data={"username": self.user.get_username(), "password": "incorrect"},
++                content_type="application/json",
++                HTTP_X_CSRFTOKEN=csrf_token,
++                REMOTE_ADDR="198.51.100.45",
++            )
++            self.assertEqual(response.status_code, 401, response.content)
++        limited = self.client.post(
++            reverse("accounts:login"),
++            data={"username": self.user.get_username(), "password": "incorrect"},
++            content_type="application/json",
++            HTTP_X_CSRFTOKEN=csrf_token,
++            REMOTE_ADDR="198.51.100.45",
++        )
++        self.assertEqual(limited.status_code, 429, limited.content)
++        cache.clear()
++
++
++class LoginThrottleConfigurationTests(TestCase):
++    def test_login_endpoint_declares_the_custom_rate_throttle(self):
++        from accounts.throttles import LoginRateThrottle
++        from accounts.views import SessionLoginView
++        from django.conf import settings
++
++        self.assertIn(LoginRateThrottle, SessionLoginView.throttle_classes)
++        self.assertEqual(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["login"], "10/min")
+
+diff --git a/backend/analyses/consumers.py b/backend/analyses/consumers.py
+--- a/backend/analyses/consumers.py
++++ b/backend/analyses/consumers.py
+@@ -10,6 +10,7 @@
+ from channels.generic.websocket import AsyncJsonWebsocketConsumer
+ 
+ from analyses.models import AnalysisReport
++from enterprise_identity.services import matter_access_allowed
+ from tenants.models import Tenant, TenantMembership
+ 
+ logger = logging.getLogger(__name__)
+@@ -170,10 +171,26 @@
+         ):
+             return None
+ 
+-        membership_is_active = TenantMembership.objects.filter(
+-            tenant_id=report.tenant_id,
+-            tenant__status=Tenant.Status.ACTIVE,
+-            user_id=user_id,
+-            status=TenantMembership.Status.ACTIVE,
+-        ).exists()
+-        return str(report.tenant_id) if membership_is_active else None
++        membership = (
++            TenantMembership.objects.select_related("tenant", "user")
++            .filter(
++                tenant_id=report.tenant_id,
++                tenant__status=Tenant.Status.ACTIVE,
++                user_id=user_id,
++                status=TenantMembership.Status.ACTIVE,
++            )
++            .first()
++        )
++        if membership is None:
++            return None
++        # Match the HTTP authorization boundary: tenant membership alone does
++        # not grant access to a matter whose explicit ACL is enforced.
++        if not matter_access_allowed(
++            tenant=membership.tenant,
++            user=membership.user,
++            matter_type="analysis",
++            matter_id=report.pk,
++            required="READ",
++        ):
++            return None
++        return str(report.tenant_id)
+
+diff --git a/backend/config/settings.py b/backend/config/settings.py
+--- a/backend/config/settings.py
++++ b/backend/config/settings.py
+@@ -363,6 +363,9 @@
+     "DEFAULT_RENDERER_CLASSES": [
+         "rest_framework.renderers.JSONRenderer",
+     ],
++    "DEFAULT_THROTTLE_RATES": {
++        "login": os.getenv("PATENTSHIELD_LOGIN_RATE", "10/min"),
++    },
+ }
+ 
+ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+@@ -557,6 +560,7 @@
+     raise ImproperlyConfigured(
+         "PATENTSHIELD_FTO_MAX_UPLOAD_BYTES must be positive and no greater than PATENTSHIELD_MAX_PDF_UPLOAD_BYTES."
+     )
++# Startup preflight: mock embeddings are never a valid production runtime.
+ if not DEBUG and PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS:
+     raise ImproperlyConfigured(
+         "Mock embeddings must be disabled when DJANGO_DEBUG=False."
+
+diff --git a/backend/enterprise_identity/services.py b/backend/enterprise_identity/services.py
+--- a/backend/enterprise_identity/services.py
++++ b/backend/enterprise_identity/services.py
+@@ -48,22 +48,22 @@
+ 
+ 
+ def audit_identity(*, tenant: Tenant, actor, action: str, resource_type: str, resource_id=None, metadata=None, outcome=AuditLog.Outcome.SUCCESS) -> None:
+-    """Persist an enterprise identity event without credentials or claims dumps."""
+-    try:
++    """Persist a security audit event; failures must abort the surrounding change.
++
++    Callers that mutate identity, grant, or credential state wrap both the mutation
++    and this write in one ``transaction.atomic()`` block. Never swallow audit
++    persistence exceptions for security-sensitive state transitions.
++    """
++    with transaction.atomic():
+         AuditLog.objects.create(
+             tenant=tenant,
+-            actor_user_id=actor.id if getattr(actor, "is_authenticated", False) else None,
++            actor_user_id=actor.pk if getattr(actor, "is_authenticated", False) else None,
+             action=action,
+             resource_type=resource_type,
+             resource_id=resource_id,
+             outcome=outcome,
+             metadata=metadata or {},
+         )
+-    except Exception:
+-        # Security event writes should be visible in app logs but must not leak
+-        # user payloads or cause an authentication response to expose internals.
+-        import logging
+-        logging.getLogger(__name__).exception("Enterprise identity audit persistence failed.")
+ 
+ 
+ def _fernet() -> Fernet:
+@@ -118,7 +118,8 @@
+         for item in str(getattr(settings, "PATENTSHIELD_IDP_ALLOWED_HOSTS", "") or "").split(",")
+         if item.strip()
+     }
+-    if allowed_hosts and host not in allowed_hosts:
++    # Fail closed: an empty allowlist must never silently mean "any public host".
++    if not allowed_hosts or host not in allowed_hosts:
+         return False
+     try:
+         answers = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+@@ -495,6 +496,7 @@
+     "fto_study": ("fto.models", "FTOStudy"),
+     "product_matter": ("fto.models", "ProductMatter"),
+     "landscape_study": ("landscapes.models", "LandscapeStudy"),
++    "portfolio_valuation": ("portfolio_valuation.models", "PortfolioValuationStudy"),
+ }
+ 
+ 
+@@ -576,19 +578,70 @@
+ 
+ 
+ def membership_for_scim(*, token: SCIMToken, user, active: bool, role: str | None = None) -> None:
+-    """Activate/revoke only this tenant membership; never disable unrelated tenants."""
+-    membership, created = TenantMembership.objects.get_or_create(
+-        tenant=token.tenant, user=user,
+-        defaults={"role": role or TenantMembership.Role.READ_ONLY, "status": TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED},
+-    )
+-    if not created:
+-        if role in TenantMembership.Role.values:
+-            membership.role = role
+-        membership.status = TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED
+-        membership.save(update_fields=("role", "status"))
+-    if not active:
+-        has_other_active = TenantMembership.objects.filter(user=user, status=TenantMembership.Status.ACTIVE, tenant__status=Tenant.Status.ACTIVE).exclude(tenant=token.tenant).exists()
+-        if not has_other_active:
+-            user.is_active = False
+-            user.save(update_fields=("is_active",))
+-            revoke_all_django_sessions_for_user(user, actor=token.created_by)
++    """Update one tenant membership and safely track SCIM-caused global disablement.
++
++    A globally disabled account is reactivated only when this SCIM binding was
++    the reason it was disabled. All membership/user/session changes and their
++    security audit record are part of one database transaction.
++    """
++    with transaction.atomic():
++        locked_user = User.objects.select_for_update().get(pk=user.pk)
++        membership, created = TenantMembership.objects.select_for_update().get_or_create(
++            tenant=token.tenant,
++            user=locked_user,
++            defaults={
++                "role": role or TenantMembership.Role.READ_ONLY,
++                "status": TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED,
++            },
++        )
++        if not created:
++            if role in TenantMembership.Role.values:
++                membership.role = role
++            membership.status = TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED
++            membership.save(update_fields=("role", "status"))
++
++        binding = (
++            SCIMUserBinding.objects.select_for_update()
++            .filter(tenant=token.tenant, user=locked_user)
++            .first()
++        )
++        global_state_changed = False
++        if not active:
++            has_other_active = TenantMembership.objects.filter(
++                user=locked_user,
++                status=TenantMembership.Status.ACTIVE,
++                tenant__status=Tenant.Status.ACTIVE,
++            ).exclude(tenant=token.tenant).exists()
++            if not has_other_active and locked_user.is_active:
++                locked_user.is_active = False
++                locked_user.save(update_fields=("is_active",))
++                global_state_changed = True
++                if binding is not None:
++                    binding.globally_disabled_by_scim = True
++                    binding.save(update_fields=("globally_disabled_by_scim", "updated_at"))
++                revoke_all_django_sessions_for_user(locked_user, actor=token.created_by)
++        elif binding is not None and binding.globally_disabled_by_scim:
++            # The SCIM integration itself disabled this account. Restore it only
++            # while the marker is present, then clear the marker transactionally.
++            if not locked_user.is_active:
++                locked_user.is_active = True
++                locked_user.save(update_fields=("is_active",))
++                global_state_changed = True
++            binding.globally_disabled_by_scim = False
++            binding.save(update_fields=("globally_disabled_by_scim", "updated_at"))
++
++        user.is_active = locked_user.is_active
++        audit_identity(
++            tenant=token.tenant,
++            actor=token.created_by,
++            action="SCIM_MEMBERSHIP_ACTIVATED" if active else "SCIM_MEMBERSHIP_REVOKED",
++            resource_type="TenantMembership",
++            resource_id=membership.pk,
++            metadata={
++                "target_user_id": str(locked_user.pk),
++                "membership_created": created,
++                "active": active,
++                "global_state_changed": global_state_changed,
++                "scim_external_id": binding.external_id if binding else None,
++            },
++        )
+
+diff --git a/backend/enterprise_identity/models.py b/backend/enterprise_identity/models.py
+--- a/backend/enterprise_identity/models.py
++++ b/backend/enterprise_identity/models.py
+@@ -114,6 +114,7 @@
+     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+     external_id = models.CharField(max_length=255)
+     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="scim_bindings")
++    globally_disabled_by_scim = models.BooleanField(default=False)
+     created_at = models.DateTimeField(auto_now_add=True)
+     updated_at = models.DateTimeField(auto_now=True)
+ 
+
+diff --git a/backend/enterprise_identity/views.py b/backend/enterprise_identity/views.py
+--- a/backend/enterprise_identity/views.py
++++ b/backend/enterprise_identity/views.py
+@@ -92,6 +92,7 @@
+         rows = IdentityProvider.objects.for_tenant(tenant.pk).order_by("name")
+         return Response({"results": IdentityProviderSerializer(rows, many=True).data})
+ 
++    @transaction.atomic
+     def post(self, request: Request) -> Response:
+         tenant = self.tenant(request)
+         serializer = IdentityProviderSerializer(data=request.data)
+@@ -108,6 +109,7 @@
+     def get(self, request: Request, provider_id) -> Response:
+         return Response(IdentityProviderSerializer(self.get_provider(request, provider_id)).data)
+ 
++    @transaction.atomic
+     def patch(self, request: Request, provider_id) -> Response:
+         tenant = self.tenant(request)
+         provider = self.get_provider(request, provider_id)
+@@ -117,6 +119,7 @@
+         audit_identity(tenant=tenant, actor=request.user, action="IDENTITY_PROVIDER_UPDATED", resource_type="IdentityProvider", resource_id=provider.pk, metadata={"fields": sorted(serializer.validated_data.keys())})
+         return Response(IdentityProviderSerializer(provider).data)
+ 
++    @transaction.atomic
+     def delete(self, request: Request, provider_id) -> Response:
+         tenant = self.tenant(request)
+         provider = self.get_provider(request, provider_id)
+@@ -225,6 +228,7 @@
+         rows = SCIMToken.objects.for_tenant(self.tenant(request).pk).order_by("-created_at")
+         return Response({"results": SCIMTokenSerializer(rows, many=True).data})
+ 
++    @transaction.atomic
+     def post(self, request: Request) -> Response:
+         tenant = self.tenant(request)
+         label = str(request.data.get("label", "")).strip()[:120]
+@@ -252,6 +256,7 @@
+ 
+ 
+ class SCIMTokenRevokeView(EnterpriseAdminAPIView):
++    @transaction.atomic
+     def post(self, request: Request, token_id) -> Response:
+         tenant = self.tenant(request)
+         token = get_object_or_404(SCIMToken.objects.for_tenant(tenant.pk), pk=token_id)
+@@ -270,6 +275,7 @@
+             rows = rows.filter(matter_type=matter_type)
+         return Response({"results": MatterPolicySerializer(rows.order_by("matter_type", "matter_id")[:500], many=True).data})
+ 
++    @transaction.atomic
+     def post(self, request: Request) -> Response:
+         tenant = self.tenant(request)
+         serializer = MatterPolicySerializer(data=request.data)
+@@ -289,6 +295,7 @@
+ 
+ 
+ class MatterPolicyDetailView(EnterpriseAdminAPIView):
++    @transaction.atomic
+     def patch(self, request: Request, policy_id) -> Response:
+         tenant = self.tenant(request)
+         policy = get_object_or_404(MatterPolicy.objects.for_tenant(tenant.pk), pk=policy_id)
+@@ -315,6 +322,7 @@
+             rows = rows.filter(matter_id=request.query_params["matter_id"])
+         return Response({"results": MatterGrantSerializer(rows[:1000], many=True).data})
+ 
++    @transaction.atomic
+     def post(self, request: Request) -> Response:
+         tenant = self.tenant(request)
+         serializer = MatterGrantSerializer(data=request.data)
+@@ -330,6 +338,7 @@
+ 
+ 
+ class MatterGrantDeleteView(EnterpriseAdminAPIView):
++    @transaction.atomic
+     def delete(self, request: Request, grant_id) -> Response:
+         tenant = self.tenant(request)
+         grant = get_object_or_404(MatterGrant.objects.for_tenant(tenant.pk), pk=grant_id)
+@@ -429,6 +438,7 @@
+ 
+ 
+ class ManagedSessionRevokeView(EnterpriseAdminAPIView):
++    @transaction.atomic
+     def post(self, request: Request, session_id) -> Response:
+         tenant = self.tenant(request)
+         record = get_object_or_404(ManagedSession.objects.filter(user__tenant_memberships__tenant=tenant, user__tenant_memberships__status=TenantMembership.Status.ACTIVE).distinct(), pk=session_id)
+@@ -438,6 +448,7 @@
+ 
+ 
+ class UserSessionsRevokeAllView(EnterpriseAdminAPIView):
++    @transaction.atomic
+     def post(self, request: Request, user_id) -> Response:
+         tenant = self.tenant(request)
+         target = get_object_or_404(User.objects.filter(tenant_memberships__tenant=tenant, tenant_memberships__status=TenantMembership.Status.ACTIVE).distinct(), pk=user_id)
+@@ -578,7 +589,7 @@
+         from enterprise_identity.services import membership_for_scim
+         binding.save(update_fields=("external_id", "updated_at"))
+         membership_for_scim(token=token, user=user, active=active, role=role)
+-    audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_UPDATED" if not create else "SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": binding.external_id})
++        audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_UPDATED" if not create else "SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": binding.external_id})
+     return binding
+ 
+ 
+@@ -611,6 +622,7 @@
+         resources = [_scim_resource(request._request, token, binding) for binding in selected]
+         return Response({"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": total, "startIndex": start_index, "itemsPerPage": len(resources), "Resources": resources}, content_type="application/scim+json")
+ 
++    @transaction.atomic
+     def post(self, request: Request, tenant_slug: str) -> Response:
+         token = request.auth
+         data = request.data
+@@ -646,15 +658,18 @@
+             return _scim_error("active must be a boolean.", "invalidValue", 400)
+         try:
+             with transaction.atomic():
+-                user = User(username=username, email=email, first_name=given_name[:150], last_name=family_name[:150], is_active=active)
++                # Start active only inside this transaction so membership_for_scim
++                # can mark a SCIM-requested inactive account as SCIM-disabled. The
++                # account state is not visible until the atomic block commits.
++                user = User(username=username, email=email, first_name=given_name[:150], last_name=family_name[:150], is_active=True)
+                 user.set_unusable_password()
+                 user.save()
+                 binding = SCIMUserBinding.objects.create(tenant=token.tenant, external_id=external_id, user=user)
+                 from enterprise_identity.services import membership_for_scim
+                 membership_for_scim(token=token, user=user, active=active, role=TenantMembership.Role.READ_ONLY)
++                audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": external_id})
+         except IntegrityError:
+             return _scim_error("A user with this identity already exists.", "uniqueness", 409)
+-        audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": external_id})
+         return Response(_scim_resource(request._request, token, binding), status=201, content_type="application/scim+json", headers={"Location": request.build_absolute_uri(f"/api/v1/enterprise-auth/scim/v2/{tenant_slug}/Users/{user.pk}/")})
+ 
+ 
+@@ -670,6 +685,7 @@
+     def get(self, request: Request, tenant_slug: str, user_id) -> Response:
+         return Response(_scim_resource(request._request, request.auth, self.binding(request, user_id)), content_type="application/scim+json")
+ 
++    @transaction.atomic
+     def put(self, request: Request, tenant_slug: str, user_id) -> Response:
+         token = request.auth
+         binding = self.binding(request, user_id)
+@@ -692,6 +708,7 @@
+             return _scim_error("The SCIM user resource is invalid or conflicts with an existing account.", "invalidValue", 400)
+         return Response(_scim_resource(request._request, token, binding), content_type="application/scim+json")
+ 
++    @transaction.atomic
+     def patch(self, request: Request, tenant_slug: str, user_id) -> Response:
+         token = request.auth
+         binding = self.binding(request, user_id)
+@@ -739,6 +756,7 @@
+             return _scim_error("The SCIM patch could not be applied atomically.", "invalidValue", 400)
+         return Response(_scim_resource(request._request, token, binding), content_type="application/scim+json")
+ 
++    @transaction.atomic
+     def delete(self, request: Request, tenant_slug: str, user_id) -> Response:
+         token = request.auth
+         binding = self.binding(request, user_id)
+
+diff --git a/backend/enterprise_identity/tests.py b/backend/enterprise_identity/tests.py
+--- a/backend/enterprise_identity/tests.py
++++ b/backend/enterprise_identity/tests.py
+@@ -18,6 +18,7 @@
+     MatterGrant,
+     MatterPolicy,
+     SCIMToken,
++    SCIMUserBinding,
+ )
+ from enterprise_identity.services import (
+     _https_url,
+@@ -58,6 +59,13 @@
+         getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
+         self.assertTrue(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
+ 
++    @override_settings(PATENTSHIELD_IDP_ALLOWED_HOSTS="")
++    @patch("enterprise_identity.services.socket.getaddrinfo")
++    def test_oidc_endpoint_allowlist_must_not_be_empty(self, getaddrinfo):
++        getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
++        self.assertFalse(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
++        getaddrinfo.assert_not_called()
++
+     def test_csv_formula_prefixes_are_neutralized(self):
+         from enterprise_identity.views import _safe_csv_cell
+         self.assertEqual(_safe_csv_cell("=1+1"), "'=1+1")
+@@ -174,6 +182,24 @@
+         self.assertFalse(self.member.is_active)
+         self.assertEqual(TenantMembership.objects.get(tenant=self.tenant, user=self.member).status, TenantMembership.Status.ACTIVE)
+ 
++    def test_scim_reactivation_restores_only_an_account_disabled_by_scim(self):
++        token = SCIMToken.objects.create(
++            tenant=self.tenant, label="directory", token_hash=hashlib.sha256(b"private-token-scim-toggle").hexdigest(),
++            scopes=["Users:write"], created_by=self.user,
++        )
++        binding = SCIMUserBinding.objects.create(tenant=self.tenant, external_id="analyst-01", user=self.member)
++        membership_for_scim(token=token, user=self.member, active=False)
++        self.member.refresh_from_db()
++        binding.refresh_from_db()
++        self.assertFalse(self.member.is_active)
++        self.assertTrue(binding.globally_disabled_by_scim)
++
++        membership_for_scim(token=token, user=self.member, active=True)
++        self.member.refresh_from_db()
++        binding.refresh_from_db()
++        self.assertTrue(self.member.is_active)
++        self.assertFalse(binding.globally_disabled_by_scim)
++
+     def test_session_registry_stores_only_hmac_digest(self):
+         raw_key = "sample-django-session-key-not-to-persist"
+         digest = session_key_hash(raw_key)
+
+diff --git a/backend/enterprise_identity/migrations/0002_scimuserbinding_globally_disabled_by_scim.py b/backend/enterprise_identity/migrations/0002_scimuserbinding_globally_disabled_by_scim.py
+--- /dev/null
++++ b/backend/enterprise_identity/migrations/0002_scimuserbinding_globally_disabled_by_scim.py
+@@ -0,0 +1,16 @@
++# Track whether global account disablement was caused by this SCIM binding.
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("enterprise_identity", "0001_initial"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="scimuserbinding",
++            name="globally_disabled_by_scim",
++            field=models.BooleanField(default=False),
++        ),
++    ]
+
+diff --git a/backend/ingestion/tasks.py b/backend/ingestion/tasks.py
+--- a/backend/ingestion/tasks.py
++++ b/backend/ingestion/tasks.py
+@@ -6,10 +6,12 @@
+ import hmac
+ import io
+ import logging
++from datetime import timedelta
+ 
+ from celery import Task, shared_task
+ from django.core.files.storage import default_storage
+ from django.db import transaction
++from django.utils import timezone
+ 
+ from audit.models import AuditLog
+ from ingestion.parsers import ClaimDeconstructionParser
+@@ -17,12 +19,43 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
++MAX_PDF_PAGES = 2_000
++MAX_EXTRACTED_CHARACTERS = 25_000_000
++PROCESSING_LEASE = timedelta(minutes=45)
++
++
++class PDFResourceLimitError(ValueError):
++    """Raised when a PDF exceeds the configured extraction resource limits."""
++
++
++def _bounded_join_pages(pages, page_count: int) -> tuple[str, int]:
++    if page_count > MAX_PDF_PAGES:
++        raise PDFResourceLimitError(
++            f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
++        )
++    extracted_pages: list[str] = []
++    total_characters = 0
++    for page in pages:
++        page_text = page.extract_text() or ""
++        total_characters += len(page_text) + (1 if extracted_pages else 0)
++        if total_characters > MAX_EXTRACTED_CHARACTERS:
++            raise PDFResourceLimitError(
++                "PDF text exceeds the 25-million-character extraction limit."
++            )
++        extracted_pages.append(page_text)
++    extracted_text = "\n".join(extracted_pages).strip()
++    if len(extracted_text) > MAX_EXTRACTED_CHARACTERS:
++        raise PDFResourceLimitError(
++            "PDF text exceeds the 25-million-character extraction limit."
++        )
++    return extracted_text, page_count
++
+ 
+ def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
+-    """Extract text and page count with pypdf, falling back to PyMuPDF.
+-
+-    Install ``pypdf`` or ``PyMuPDF`` in the worker image. Keeping both imports
+-    optional lets deployments choose either extraction library.
++    """Extract bounded text with pypdf, falling back to PyMuPDF.
++
++    Limits are checked before iterating pages and after each page extraction to
++    prevent unbounded document/page accumulation in a background worker.
+     """
+     extraction_errors: list[Exception] = []
+ 
+@@ -33,16 +66,20 @@
+     else:
+         try:
+             reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
+-            page_text = [page.extract_text() or "" for page in reader.pages]
+-            extracted_text = "\n".join(page_text).strip()
++            page_count = len(reader.pages)
++            if page_count > MAX_PDF_PAGES:
++                raise PDFResourceLimitError(
++                    f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
++                )
++            extracted_text, page_count = _bounded_join_pages(reader.pages, page_count)
+             if extracted_text:
+-                return extracted_text, len(reader.pages)
++                return extracted_text, page_count
+             extraction_errors.append(
+-                ValueError(
+-                    "pypdf did not extract readable text from this PDF."
+-                )
+-            )
+-        except Exception as exc:  # Continue to the alternate supported parser.
++                ValueError("pypdf did not extract readable text from this PDF.")
++            )
++        except PDFResourceLimitError:
++            raise
++        except Exception as exc:
+             extraction_errors.append(exc)
+ 
+     try:
+@@ -52,31 +89,44 @@
+     else:
+         try:
+             with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
+-                page_text = [
+-                    page.get_text("text") or "" for page in pdf_document
+-                ]
+-                extracted_text = "\n".join(page_text).strip()
+-                if extracted_text:
+-                    return extracted_text, pdf_document.page_count
+-                extraction_errors.append(
+-                    ValueError(
+-                        "PyMuPDF did not extract readable text from this PDF."
++                page_count = pdf_document.page_count
++                if page_count > MAX_PDF_PAGES:
++                    raise PDFResourceLimitError(
++                        f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
+                     )
+-                )
+-        except Exception as exc:  # Record and retry extraction errors.
++                # PyMuPDF pages expose get_text(), not pypdf's extract_text().
++                page_texts: list[str] = []
++                total_characters = 0
++                for page in pdf_document:
++                    page_text = page.get_text("text") or ""
++                    total_characters += len(page_text) + (1 if page_texts else 0)
++                    if total_characters > MAX_EXTRACTED_CHARACTERS:
++                        raise PDFResourceLimitError(
++                            "PDF text exceeds the 25-million-character extraction limit."
++                        )
++                    page_texts.append(page_text)
++                extracted_text = "\n".join(page_texts).strip()
++                if len(extracted_text) > MAX_EXTRACTED_CHARACTERS:
++                    raise PDFResourceLimitError(
++                        "PDF text exceeds the 25-million-character extraction limit."
++                    )
++            if extracted_text:
++                return extracted_text, page_count
++            extraction_errors.append(
++                ValueError("PyMuPDF did not extract readable text from this PDF.")
++            )
++        except PDFResourceLimitError:
++            raise
++        except Exception as exc:
+             extraction_errors.append(exc)
+ 
+     if not extraction_errors:
+         raise RuntimeError("No PDF extraction backend is available.")
+     if all(isinstance(error, ImportError) for error in extraction_errors):
+         raise RuntimeError(
+-            "PDF extraction requires pypdf or PyMuPDF; install one in the "
+-            "worker image."
++            "PDF extraction requires pypdf or PyMuPDF; install one in the worker image."
+         ) from extraction_errors[-1]
+-    raise RuntimeError("Unable to extract readable text from the PDF.") from (
+-        extraction_errors[-1]
+-    )
+-
++    raise RuntimeError("Unable to extract readable text from the PDF.") from extraction_errors[-1]
+ 
+ def _record_extraction_failure(
+     document_version: PatentDocumentVersion,
+@@ -89,7 +139,8 @@
+             pk=document_version.pk,
+             tenant_id=document_version.tenant_id,
+         ).update(
+-            extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED
++            extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED,
++            extraction_started_at=None,
+         )
+         Patent.objects.filter(
+             pk=document_version.patent_id,
+@@ -133,18 +184,35 @@
+     document_version: PatentDocumentVersion | None = None
+ 
+     try:
+-        document_version = (
+-            PatentDocumentVersion.objects.select_related("patent")
+-            .get(pk=document_version_id)
+-        )
+-        document_version.extraction_status = (
+-            PatentDocumentVersion.ExtractionStatus.EXTRACTING
+-        )
+-        document_version.save(update_fields=("extraction_status",))
+-        Patent.objects.filter(
+-            pk=document_version.patent_id,
+-            tenant_id=document_version.tenant_id,
+-        ).update(status=Patent.Status.PROCESSING)
++        with transaction.atomic():
++            document_version = (
++                PatentDocumentVersion.objects.select_for_update()
++                .select_related("patent")
++                .get(pk=document_version_id)
++            )
++            if document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTED:
++                return {
++                    "document_version_id": str(document_version.pk),
++                    "extraction_status": document_version.extraction_status,
++                    "idempotent": 1,
++                }
++            if (
++                document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTING
++                and document_version.extraction_started_at
++                and document_version.extraction_started_at > timezone.now() - PROCESSING_LEASE
++            ):
++                return {
++                    "document_version_id": str(document_version.pk),
++                    "extraction_status": document_version.extraction_status,
++                    "already_processing": 1,
++                }
++            document_version.extraction_status = PatentDocumentVersion.ExtractionStatus.EXTRACTING
++            document_version.extraction_started_at = timezone.now()
++            document_version.save(update_fields=("extraction_status", "extraction_started_at"))
++            Patent.objects.filter(
++                pk=document_version.patent_id,
++                tenant_id=document_version.tenant_id,
++            ).update(status=Patent.Status.PROCESSING)
+ 
+         if document_version.patent.tenant_id != document_version.tenant_id:
+             raise ValueError(
+@@ -196,9 +264,8 @@
+                 pk=document_version.pk,
+                 tenant_id=document_version.tenant_id,
+             ).update(
+-                extraction_status=(
+-                    PatentDocumentVersion.ExtractionStatus.EXTRACTED
+-                ),
++                extraction_status=PatentDocumentVersion.ExtractionStatus.EXTRACTED,
++                extraction_started_at=None,
+                 page_count=page_count,
+             )
+ 
+@@ -249,4 +316,7 @@
+                 "No tenant context is available to audit failed version %s.",
+                 document_version_id,
+             )
++        if isinstance(exc, PDFResourceLimitError):
++            # Retrying an over-limit artifact cannot succeed and amplifies CPU cost.
++            raise
+         raise self.retry(exc=exc, countdown=60)
+
+diff --git a/backend/ingestion/tests.py b/backend/ingestion/tests.py
+--- a/backend/ingestion/tests.py
++++ b/backend/ingestion/tests.py
+@@ -1,3 +1,30 @@
+ from django.test import TestCase
+ 
+ # Create your tests here.
++
++
++class PDFExtractionResourceLimitTests(TestCase):
++    def test_page_limit_is_checked_before_extraction(self):
++        from unittest.mock import patch
++        from ingestion.tasks import PDFResourceLimitError, _bounded_join_pages
++
++        class FakePage:
++            def extract_text(self):
++                raise AssertionError("page extraction must not start above the page limit")
++
++        with patch("ingestion.tasks.MAX_PDF_PAGES", 1), self.assertRaises(PDFResourceLimitError):
++            _bounded_join_pages([FakePage(), FakePage()], page_count=2)
++
++    def test_character_limit_is_enforced_during_page_iteration(self):
++        from unittest.mock import patch
++        from ingestion.tasks import PDFResourceLimitError, _bounded_join_pages
++
++        class FakePage:
++            def __init__(self, text):
++                self.text = text
++
++            def extract_text(self):
++                return self.text
++
++        with patch("ingestion.tasks.MAX_EXTRACTED_CHARACTERS", 5), self.assertRaises(PDFResourceLimitError):
++            _bounded_join_pages([FakePage("123"), FakePage("456")], page_count=2)
+
+diff --git a/backend/office_actions/tasks.py b/backend/office_actions/tasks.py
+--- a/backend/office_actions/tasks.py
++++ b/backend/office_actions/tasks.py
+@@ -5,10 +5,12 @@
+ import hmac
+ import io
+ import logging
++from datetime import timedelta
+ 
+ from celery import Task, shared_task
+ from django.core.files.storage import default_storage
+ from django.db import transaction
++from django.utils import timezone
+ 
+ from audit.models import AuditLog
+ from office_actions.models import OfficeAction
+@@ -21,8 +23,24 @@
+     """An invalid document or configuration issue that retry cannot fix."""
+ 
+ 
++class PDFResourceLimitError(PermanentOfficeActionProcessingError):
++    """The supplied PDF exceeds page or extracted-text limits."""
++
++
++MAX_PDF_PAGES = 2_000
++MAX_EXTRACTED_CHARACTERS = 25_000_000
++PROCESSING_LEASE = timedelta(minutes=45)
++
++
++def _check_page_count(page_count: int) -> None:
++    if page_count > MAX_PDF_PAGES:
++        raise PDFResourceLimitError(
++            f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
++        )
++
++
+ def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
+-    """Extract per-page text, preferring pypdf and falling back to PyMuPDF."""
++    """Extract text with page and total-character limits before accumulation."""
+     errors: list[Exception] = []
+     try:
+         from pypdf import PdfReader
+@@ -31,10 +49,22 @@
+     else:
+         try:
+             reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
+-            pages = [(page.extract_text() or "") for page in reader.pages]
++            _check_page_count(len(reader.pages))
++            pages: list[str] = []
++            total_characters = 0
++            for page in reader.pages:
++                text = page.extract_text() or ""
++                total_characters += len(text) + (1 if pages else 0)
++                if total_characters > MAX_EXTRACTED_CHARACTERS:
++                    raise PDFResourceLimitError(
++                        "PDF text exceeds the 25-million-character extraction limit."
++                    )
++                pages.append(text)
+             if any(page.strip() for page in pages):
+                 return pages
+             errors.append(ValueError("No readable text was extracted by pypdf."))
++        except PDFResourceLimitError:
++            raise
+         except Exception as exc:
+             errors.append(exc)
+     try:
+@@ -44,10 +74,22 @@
+     else:
+         try:
+             with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+-                pages = [(page.get_text("text") or "") for page in document]
++                _check_page_count(document.page_count)
++                pages: list[str] = []
++                total_characters = 0
++                for page in document:
++                    text = page.get_text("text") or ""
++                    total_characters += len(text) + (1 if pages else 0)
++                    if total_characters > MAX_EXTRACTED_CHARACTERS:
++                        raise PDFResourceLimitError(
++                            "PDF text exceeds the 25-million-character extraction limit."
++                        )
++                    pages.append(text)
+             if any(page.strip() for page in pages):
+                 return pages
+             errors.append(ValueError("No readable text was extracted by PyMuPDF."))
++        except PDFResourceLimitError:
++            raise
+         except Exception as exc:
+             errors.append(exc)
+     if errors and all(isinstance(error, ImportError) for error in errors):
+@@ -57,22 +99,35 @@
+ 
+ @shared_task(bind=True, max_retries=3, acks_late=True)
+ def process_office_action(self: Task, office_action_id: str) -> dict[str, object]:
+-    """Extract text, classify likely grounds, and map reference identifiers.
+-
+-    Job payloads contain only the office-action UUID. Tenant, parent matter and
+-    document integrity are revalidated from the database at execution time.
+-    """
++    """Extract, classify, and map citations with row-lock single-flight semantics."""
+     action = None
+     try:
+-        action = OfficeAction.objects.select_related("patent", "created_by").get(pk=office_action_id)
+-        if action.patent.tenant_id != action.tenant_id:
+-            raise PermanentOfficeActionProcessingError("Office action and patent tenant boundaries do not match.")
+-        if action.extraction_status == OfficeAction.ExtractionStatus.EXTRACTED and action.parse_status in {OfficeAction.ParseStatus.COMPLETED, OfficeAction.ParseStatus.NEEDS_REVIEW}:
+-            return {"office_action_id": str(action.pk), "status": action.extraction_status, "idempotent": True}
+-        OfficeAction.objects.filter(pk=action.pk, tenant_id=action.tenant_id).update(
+-            extraction_status=OfficeAction.ExtractionStatus.PROCESSING,
+-            extraction_error_code="",
+-        )
++        with transaction.atomic():
++            action = (
++                OfficeAction.objects.select_for_update()
++                .select_related("patent", "created_by")
++                .get(pk=office_action_id)
++            )
++            if (
++                action.extraction_status == OfficeAction.ExtractionStatus.EXTRACTED
++                and action.parse_status in {
++                    OfficeAction.ParseStatus.COMPLETED,
++                    OfficeAction.ParseStatus.NEEDS_REVIEW,
++                }
++            ):
++                return {"office_action_id": str(action.pk), "status": action.extraction_status, "idempotent": True}
++            now = timezone.now()
++            if (
++                action.extraction_status == OfficeAction.ExtractionStatus.PROCESSING
++                and action.updated_at > now - PROCESSING_LEASE
++            ):
++                return {"office_action_id": str(action.pk), "status": action.extraction_status, "already_processing": True}
++            if action.patent.tenant_id != action.tenant_id:
++                raise PermanentOfficeActionProcessingError("Office action and patent tenant boundaries do not match.")
++            action.extraction_status = OfficeAction.ExtractionStatus.PROCESSING
++            action.extraction_error_code = ""
++            action.save(update_fields=("extraction_status", "extraction_error_code", "updated_at"))
++
+         try:
+             with default_storage.open(action.storage_key, "rb") as source:
+                 pdf_bytes = source.read()
+@@ -85,21 +140,30 @@
+             raise PermanentOfficeActionProcessingError("Stored office-action PDF failed its SHA-256 integrity check.")
+         try:
+             pages = _extract_pdf_pages(pdf_bytes)
++        except PDFResourceLimitError:
++            raise
+         except RuntimeError as exc:
+             raise PermanentOfficeActionProcessingError(str(exc)) from exc
+         if not pages or not any(page.strip() for page in pages):
+             raise PermanentOfficeActionProcessingError("The office-action document has no extractable text; OCR is not configured.")
+         joined = "\n".join(pages)
++        if len(joined) > MAX_EXTRACTED_CHARACTERS:
++            raise PDFResourceLimitError("PDF text exceeds the 25-million-character extraction limit.")
+         with transaction.atomic():
+             locked = OfficeAction.objects.select_for_update().get(pk=action.pk, tenant_id=action.tenant_id)
+-            # Keep extraction idempotent and preserve generated draft evidence.
++            # Keep PROCESSING set through parsing; duplicate Celery deliveries see
++            # the active lease and return without repeating expensive extraction.
+             locked.extracted_pages = pages
+             locked.extracted_text = joined
+             locked.page_count = len(pages)
++            locked.extraction_error_code = ""
++            locked.save(update_fields=("extracted_pages", "extracted_text", "page_count", "extraction_error_code", "updated_at"))
++        counts = parse_office_action(locked)
++        with transaction.atomic():
++            locked = OfficeAction.objects.select_for_update().get(pk=action.pk, tenant_id=action.tenant_id)
+             locked.extraction_status = OfficeAction.ExtractionStatus.EXTRACTED
+             locked.extraction_error_code = ""
+-            locked.save(update_fields=("extracted_pages", "extracted_text", "page_count", "extraction_status", "extraction_error_code", "updated_at"))
+-        counts = parse_office_action(locked)
++            locked.save(update_fields=("extraction_status", "extraction_error_code", "updated_at"))
+         AuditLog.objects.create(
+             tenant_id=action.tenant_id,
+             actor_user_id=action.created_by.pk,
+@@ -115,10 +179,11 @@
+         is_permanent = isinstance(exc, PermanentOfficeActionProcessingError) or action is None or isinstance(exc, OfficeAction.DoesNotExist)
+         will_retry = not is_permanent and retries < self.max_retries
+         if action is not None:
+-            code = "INTEGRITY_CHECK_FAILED" if "SHA-256" in str(exc) else "PDF_EXTRACTION_FAILED"
++            code = "RESOURCE_LIMIT_EXCEEDED" if isinstance(exc, PDFResourceLimitError) else ("INTEGRITY_CHECK_FAILED" if "SHA-256" in str(exc) else "PDF_EXTRACTION_FAILED")
+             OfficeAction.objects.filter(pk=action.pk, tenant_id=action.tenant_id).update(
+                 extraction_status=(OfficeAction.ExtractionStatus.RETRYING if will_retry else OfficeAction.ExtractionStatus.FAILED),
+                 extraction_error_code=code,
++                updated_at=timezone.now(),
+             )
+             try:
+                 AuditLog.objects.create(
+
+diff --git a/backend/office_actions/tests.py b/backend/office_actions/tests.py
+--- a/backend/office_actions/tests.py
++++ b/backend/office_actions/tests.py
+@@ -138,3 +138,12 @@
+         revision.content_markdown = "Modified in place"
+         with self.assertRaises(ValidationError):
+             revision.save()
++
++
++class OfficeActionPDFResourceLimitTests(SimpleTestCase):
++    def test_page_limit_fails_before_pdf_page_iteration(self):
++        from unittest.mock import patch
++        from office_actions.tasks import PDFResourceLimitError, _check_page_count
++
++        with patch("office_actions.tasks.MAX_PDF_PAGES", 2), self.assertRaises(PDFResourceLimitError):
++            _check_page_count(3)
+
+diff --git a/backend/patents/models.py b/backend/patents/models.py
+--- a/backend/patents/models.py
++++ b/backend/patents/models.py
+@@ -97,6 +97,7 @@
+         choices=ExtractionStatus.choices,
+         default=ExtractionStatus.PENDING,
+     )
++    extraction_started_at = models.DateTimeField(null=True, blank=True)
+     created_at = models.DateTimeField(auto_now_add=True)
+ 
+     class Meta:
+
+diff --git a/backend/patents/migrations/0005_patentdocumentversion_extraction_started_at.py b/backend/patents/migrations/0005_patentdocumentversion_extraction_started_at.py
+--- /dev/null
++++ b/backend/patents/migrations/0005_patentdocumentversion_extraction_started_at.py
+@@ -0,0 +1,17 @@
++# Add a lease timestamp so duplicate Celery deliveries can be single-flighted
++# under select_for_update while stale work can be safely reclaimed.
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("patents", "0004_alter_alertdelivery_tenant_and_more"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="patentdocumentversion",
++            name="extraction_started_at",
++            field=models.DateTimeField(blank=True, null=True),
++        ),
++    ]
+
+diff --git a/backend/patents/surveillance_tasks.py b/backend/patents/surveillance_tasks.py
+--- a/backend/patents/surveillance_tasks.py
++++ b/backend/patents/surveillance_tasks.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import logging
++from urllib.parse import urlsplit
+ from datetime import timedelta
+ from typing import Any
+ 
+@@ -402,6 +403,19 @@
+ 
+     try:
+         webhook_url = decrypt_webhook_secret(destination)
++        # Fail closed at dispatch as well as at destination creation/update. This
++        # protects against configuration drift and an accidentally empty allowlist.
++        configured_hosts = getattr(settings, "PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS", ())
++        if isinstance(configured_hosts, str):
++            allowed_hosts = {item.strip().rstrip(".").casefold() for item in configured_hosts.split(",") if item.strip()}
++        else:
++            allowed_hosts = {str(item).strip().rstrip(".").casefold() for item in (configured_hosts or ()) if str(item).strip()}
++        try:
++            requested_host = (urlsplit(webhook_url).hostname or "").rstrip(".").casefold()
++        except ValueError as exc:
++            raise UnsafeWebhookDestination("Invalid webhook URL.") from exc
++        if not allowed_hosts or not requested_host or requested_host not in allowed_hosts:
++            raise UnsafeWebhookDestination("Webhook hostname is not explicitly allowlisted.")
+         validate_webhook_url(webhook_url, resolve_dns=True)
+     except UnsafeWebhookDestination as exc:
+         logger.warning("Surveillance webhook blocked by destination policy (%s).", type(exc).__name__)
+@@ -433,13 +447,18 @@
+         }
+ 
+     try:
+-        response = requests.post(
+-            webhook_url,
+-            json=payload,
+-            timeout=(3.05, 8.0),
+-            allow_redirects=False,
+-            headers={"User-Agent": "PatentShield-Surveillance/1.0"},
+-        )
++        # Do not inherit HTTP(S)_PROXY/ALL_PROXY environment settings for a
++        # security-sensitive outbound webhook request. Deployment egress policy
++        # remains the final defense against DNS-rebinding TOCTOU races.
++        with requests.Session() as session:
++            session.trust_env = False
++            response = session.post(
++                webhook_url,
++                json=payload,
++                timeout=(3.05, 8.0),
++                allow_redirects=False,
++                headers={"User-Agent": "PatentShield-Surveillance/1.0"},
++            )
+     except requests.RequestException as exc:
+         logger.warning("Surveillance webhook request failed (%s).", type(exc).__name__)
+         raise _DeliveryFailure("WEBHOOK_NETWORK_ERROR", retryable=True) from exc
+
+diff --git a/backend/patents/test_surveillance.py b/backend/patents/test_surveillance.py
+--- a/backend/patents/test_surveillance.py
++++ b/backend/patents/test_surveillance.py
+@@ -3,7 +3,7 @@
+ from __future__ import annotations
+ 
+ from datetime import date
+-from unittest.mock import Mock, patch
++from unittest.mock import MagicMock, Mock, patch
+ 
+ from cryptography.fernet import Fernet
+ from django.contrib.auth import get_user_model
+@@ -254,6 +254,11 @@
+         with self.assertRaises(UnsafeWebhookDestination):
+             validate_webhook_url("https://127.0.0.1/webhook")
+ 
++    @override_settings(PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=[])
++    def test_webhook_policy_rejects_empty_allowlist(self):
++        with self.assertRaises(UnsafeWebhookDestination):
++            validate_webhook_url("https://hooks.slack.com/services/test")
++
+     @override_settings(PATENTSHIELD_SURVEILLANCE_WEBHOOK_ALLOWED_HOSTS=["hooks.example.org"])
+     @patch("patents.surveillance_services.socket.getaddrinfo")
+     def test_webhook_policy_rejects_dns_resolving_to_private_ip(self, getaddrinfo):
+@@ -342,9 +347,14 @@
+             next_attempt_at=timezone.now(),
+         )
+         response = Mock(status_code=200)
++        session = Mock()
++        session.post.return_value = response
++        session_context = MagicMock()
++        session_context.__enter__.return_value = session
++        session_context.__exit__.return_value = False
+         with patch("patents.surveillance_tasks.validate_webhook_url", return_value="https://hooks.slack.com/services/test/secret/token"), patch(
+-            "patents.surveillance_tasks.requests.post", return_value=response
+-        ) as post:
++            "patents.surveillance_tasks.requests.Session", return_value=session_context
++        ) as session_factory:
+             result = deliver_alert.apply(args=(str(delivery.pk),), throw=True).get()
+             duplicate_result = deliver_alert.apply(args=(str(delivery.pk),), throw=True).get()
+         delivery.refresh_from_db()
+@@ -354,8 +364,9 @@
+         self.assertEqual(delivery.last_http_status, 200)
+         self.assertEqual(AlertDeliveryAttempt.objects.filter(delivery=delivery).count(), 1)
+         self.assertEqual(duplicate_result["status"], AlertDelivery.Status.DELIVERED)
+-        self.assertEqual(post.call_count, 1)
+-        self.assertNotIn("secret/token", str(post.call_args.kwargs.get("json", {})))
++        self.assertEqual(session.post.call_count, 1)
++        self.assertFalse(session.trust_env)
++        self.assertNotIn("secret/token", str(session.post.call_args.kwargs.get("json", {})))
+ 
+     @override_settings(
+         PATENTSHIELD_SURVEILLANCE_ENABLED=True,
+
+diff --git a/backend/portfolio_valuation/services.py b/backend/portfolio_valuation/services.py
+--- a/backend/portfolio_valuation/services.py
++++ b/backend/portfolio_valuation/services.py
+@@ -74,29 +74,47 @@
+     return result["forward_citation_count"], result["backward_citation_count"], evidence
+ 
+ 
++def _event_payload(event: PatentLegalEvent | None) -> dict[str, Any]:
++    if event is None:
++        return {}
++    return {
++        "event_id": str(event.pk),
++        "event_code": event.event_code,
++        "title": event.title,
++        "event_date": event.event_date.isoformat() if event.event_date else None,
++        "provider": event.provider,
++        "source_url": event.source_url,
++        "source_payload_hash": event.source_payload_hash,
++        "legal_status_after": event.legal_status_after,
++    }
++
++
+ def _latest_legal_event(publication: PatentPublication) -> tuple[int, dict[str, Any]]:
+-    qs = PatentLegalEvent.objects.filter(publication=publication).order_by(F("event_date").desc(nulls_last=True), "-observed_at")
+-    event = qs.first()
+-    payload: dict[str, Any] = {}
+-    if event:
+-        payload = {
+-            "event_id": str(event.pk),
+-            "event_code": event.event_code,
+-            "title": event.title,
+-            "event_date": event.event_date.isoformat() if event.event_date else None,
+-            "provider": event.provider,
+-            "source_url": event.source_url,
+-            "source_payload_hash": event.source_payload_hash,
+-            "legal_status_after": event.legal_status_after,
+-        }
+-    return qs.count(), payload
+-
+-
+-def add_publication_to_study(study: PortfolioValuationStudy, publication: PatentPublication) -> tuple[PortfolioAssetSnapshot, bool]:
+-    """Pin canonical bibliographic, status, citation, and event evidence atomically."""
+-    source_snapshot = PatentSourceSnapshot.objects.filter(publication=publication).order_by("-fetched_at").first()
++    """Fallback helper for call sites without a preloaded publication batch."""
++    qs = PatentLegalEvent.objects.filter(publication=publication)
++    event_count = qs.count()
++    event = qs.order_by(F("event_date").desc(nulls_last=True), "-observed_at").first() if event_count else None
++    return event_count, _event_payload(event)
++
++
++def add_publication_to_study(
++    study: PortfolioValuationStudy,
++    publication: PatentPublication,
++    *,
++    source_snapshot: PatentSourceSnapshot | None = None,
++    source_snapshot_prefetched: bool = False,
++    legal_event_count: int | None = None,
++    prefetched_latest_event: PatentLegalEvent | None = None,
++) -> tuple[PortfolioAssetSnapshot, bool]:
++    """Pin evidence; callers can supply batched source/event lookups to avoid N+1 queries."""
++    if not source_snapshot_prefetched:
++        source_snapshot = PatentSourceSnapshot.objects.filter(publication=publication).order_by("-fetched_at").first()
+     forward, backward, citation_provenance = _provider_citations(publication, source_snapshot)
+-    event_count, latest_event = _latest_legal_event(publication)
++    if legal_event_count is None:
++        event_count, latest_event = _latest_legal_event(publication)
++    else:
++        event_count = legal_event_count
++        latest_event = _event_payload(prefetched_latest_event)
+     snapshot = {
+         "publication_id": str(publication.pk),
+         "provider": publication.provider,
+
+diff --git a/backend/portfolio_valuation/views.py b/backend/portfolio_valuation/views.py
+--- a/backend/portfolio_valuation/views.py
++++ b/backend/portfolio_valuation/views.py
+@@ -2,6 +2,7 @@
+ from __future__ import annotations
+ 
+ from django.db import IntegrityError, transaction
++from django.db.models import Count, F, Prefetch
+ from rest_framework import status
+ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+ from rest_framework.parsers import JSONParser
+@@ -12,7 +13,7 @@
+ 
+ from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
+ from landscapes.models import LandscapeStudy
+-from patents.intelligence_models import PatentPublication
++from patents.intelligence_models import PatentLegalEvent, PatentPublication, PatentSourceSnapshot
+ from portfolio_valuation.models import (
+     PortfolioAnnotation,
+     PortfolioAssetSnapshot,
+@@ -148,8 +149,35 @@
+             publications = list(PatentPublication.objects.filter(pk__in=ids).order_by("pk"))
+             if len(publications) != len(ids):
+                 raise ValidationError({"publication_ids": "One or more publications became unavailable. Refresh and retry."})
++
++            # Batch source snapshots and legal-event aggregates for this selection.
++            # PostgreSQL DISTINCT ON makes the latest row per publication one query.
++            publication_ids = [publication.pk for publication in publications]
++            latest_sources = PatentSourceSnapshot.objects.filter(
++                publication_id__in=publication_ids,
++            ).order_by("publication_id", "-fetched_at").distinct("publication_id")
++            source_by_publication = {row.publication_id: row for row in latest_sources}
++            event_counts = dict(
++                PatentLegalEvent.objects.filter(publication_id__in=publication_ids)
++                .values("publication_id")
++                .annotate(total=Count("pk"))
++                .values_list("publication_id", "total")
++            )
++            latest_events = PatentLegalEvent.objects.filter(
++                publication_id__in=publication_ids,
++            ).order_by(
++                "publication_id", F("event_date").desc(nulls_last=True), "-observed_at",
++            ).distinct("publication_id")
++            latest_event_by_publication = {row.publication_id: row for row in latest_events}
+             for publication in publications:
+-                _row, was_created = add_publication_to_study(locked_study, publication)
++                _row, was_created = add_publication_to_study(
++                    locked_study,
++                    publication,
++                    source_snapshot=source_by_publication.get(publication.pk),
++                    source_snapshot_prefetched=True,
++                    legal_event_count=event_counts.get(publication.pk, 0),
++                    prefetched_latest_event=latest_event_by_publication.get(publication.pk),
++                )
+                 created += int(was_created)
+             if created and locked_study.status == PortfolioValuationStudy.Status.READY:
+                 # Adding assets invalidates the ready state; it must be re-reviewed.
+@@ -178,8 +206,15 @@
+ class StudyScenariosView(ValuationAPIView):
+     def get(self, request: Request, study_id: str) -> Response:
+         study = self.get_study(request, study_id)
+-        rows = PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).select_related("created_by").prefetch_related("revisions").order_by("name")
+-        return Response({"count": rows.count(), "results": [scenario_payload(row) for row in rows]})
++        latest_revision = Prefetch(
++            "revisions",
++            queryset=PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id).order_by("-revision_number")[:1],
++            to_attr="prefetched_latest_revisions",
++        )
++        rows = PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).select_related("created_by", "study").prefetch_related(latest_revision).order_by("name")
++        count = rows.count()
++        current_manifest = current_asset_manifest(study)
++        return Response({"count": count, "results": [scenario_payload(row, current_manifest=current_manifest) for row in rows]})
+ 
+     def post(self, request: Request, study_id: str) -> Response:
+         self.require_role(request, _EDITOR_ROLES)
+@@ -249,11 +284,20 @@
+     """Summarize existing scenario outcomes without blending methods into one value."""
+     def get(self, request: Request, study_id: str) -> Response:
+         study = self.get_study(request, study_id)
+-        scenarios = list(PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study).order_by("name"))
++        latest_revision = Prefetch(
++            "revisions",
++            queryset=PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id).order_by("-revision_number")[:1],
++            to_attr="prefetched_latest_revisions",
++        )
++        scenarios = list(
++            PortfolioScenario.objects.filter(tenant_id=study.tenant_id, study=study)
++            .prefetch_related(latest_revision).order_by("name")
++        )
+         result = []
+         current_manifest = current_asset_manifest(study)
+         for scenario in scenarios:
+-            revision = PortfolioScenarioRevision.objects.filter(tenant_id=study.tenant_id, scenario=scenario).order_by("-revision_number").first()
++            prefetched = getattr(scenario, "prefetched_latest_revisions", None)
++            revision = prefetched[0] if prefetched else None
+             if revision:
+                 result.append({"scenario_id": str(scenario.pk), "scenario_name": scenario.name, "method": scenario.method, "currency": revision.currency, "indicated_value": revision.calculated_result.get("indicated_value"), "revision": revision.revision_number, "input_sha256": revision.input_sha256, "asset_manifest_sha256": revision.asset_manifest_sha256, "is_current_for_current_assets": revision.asset_manifest_sha256 == current_manifest})
+         return Response({"study_id": str(study.pk), "currency": study.currency, "current_asset_manifest_sha256": current_manifest, "results": result, "interpretation": "Each outcome is a separate assumption-driven scenario. Do not average these methods or treat the spread as a statistical confidence interval."})
+
+diff --git a/backend/portfolio_valuation/serializers.py b/backend/portfolio_valuation/serializers.py
+--- a/backend/portfolio_valuation/serializers.py
++++ b/backend/portfolio_valuation/serializers.py
+@@ -200,12 +200,18 @@
+     }
+ 
+ 
+-def scenario_payload(scenario):
+-    latest = scenario.revisions.filter(tenant_id=scenario.tenant_id).order_by("-revision_number").first()
++def scenario_payload(scenario, current_manifest=None):
++    """Serialize a scenario while honoring an optional one-query latest-revision prefetch."""
++    prefetched = getattr(scenario, "prefetched_latest_revisions", None)
++    latest = prefetched[0] if prefetched else None
++    if prefetched is None:
++        latest = scenario.revisions.filter(tenant_id=scenario.tenant_id).order_by("-revision_number").first()
+     payload = revision_payload(latest) if latest else None
+     if payload is not None:
+-        payload["is_current_for_current_assets"] = latest.asset_manifest_sha256 == current_asset_manifest(scenario.study)
+-        payload["current_asset_manifest_sha256"] = current_asset_manifest(scenario.study)
++        if current_manifest is None:
++            current_manifest = current_asset_manifest(scenario.study)
++        payload["is_current_for_current_assets"] = latest.asset_manifest_sha256 == current_manifest
++        payload["current_asset_manifest_sha256"] = current_manifest
+     return {
+         "id": str(scenario.pk), "name": scenario.name, "description": scenario.description,
+         "method": scenario.method, "latest_revision": payload,
+
+diff --git a/backend/portfolio_valuation/tests.py b/backend/portfolio_valuation/tests.py
+--- a/backend/portfolio_valuation/tests.py
++++ b/backend/portfolio_valuation/tests.py
+@@ -3,6 +3,8 @@
+ 
+ from django.contrib.auth import get_user_model
+ from django.core.exceptions import ValidationError as DjangoValidationError
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
+ from django.test import SimpleTestCase, TestCase
+ from rest_framework.test import APIClient
+ 
+@@ -83,6 +85,43 @@
+         response = client.get(f"/api/v1/valuation/studies/{self.study.pk}/", HTTP_X_TENANT_ID=str(self.tenant_b.pk))
+         self.assertEqual(response.status_code, 404)
+ 
++    def test_portfolio_valuation_study_is_registered_for_matter_acl(self):
++        from enterprise_identity.services import resolve_matter
++
++        resolved = resolve_matter(self.tenant_a, "portfolio_valuation", self.study.pk)
++        self.assertEqual(resolved.pk, self.study.pk)
++        self.assertEqual(resolved.__class__, PortfolioValuationStudy)
++
++    def test_asset_selection_batches_source_snapshot_and_legal_event_queries(self):
++        from patents.intelligence_models import PatentLegalEvent, PatentSourceSnapshot
++
++        publications = [
++            PatentPublication.objects.create(
++                provider=PatentPublication.Provider.USPTO,
++                provider_record_id=f"valuation-batch-{index}",
++                publication_number=f"US-BATCH-{index}",
++                jurisdiction="US",
++                title=f"Batch publication {index}",
++                legal_status=PatentPublication.LegalStatus.UNKNOWN,
++            )
++            for index in range(3)
++        ]
++        client = APIClient()
++        client.force_authenticate(self.user)
++        with CaptureQueriesContext(connection) as captured:
++            response = client.post(
++                f"/api/v1/valuation/studies/{self.study.pk}/assets/",
++                {"publication_ids": [str(item.pk) for item in publications]},
++                format="json",
++                HTTP_X_TENANT_ID=str(self.tenant_a.pk),
++            )
++        self.assertEqual(response.status_code, 201, response.data)
++        sql = [item["sql"].casefold() for item in captured.captured_queries]
++        snapshot_table = PatentSourceSnapshot._meta.db_table.casefold()
++        event_table = PatentLegalEvent._meta.db_table.casefold()
++        self.assertEqual(sum(snapshot_table in statement for statement in sql), 1)
++        self.assertEqual(sum(event_table in statement for statement in sql), 2)
++
+     def test_provider_omission_does_not_become_zero_citations(self):
+         publication = PatentPublication.objects.create(
+             provider=PatentPublication.Provider.USPTO, provider_record_id="valuation-test-1",
+
+diff --git a/scripts/release_gate.sh b/scripts/release_gate.sh
+--- a/scripts/release_gate.sh
++++ b/scripts/release_gate.sh
+@@ -13,7 +13,11 @@
+   export PATENTSHIELD_BUILD_ML_WORKER="${PATENTSHIELD_BUILD_ML_WORKER:-1}"
+ fi
+ 
+-printf '\n[1/10] Verify pinned/hash-locked dependencies and repository hygiene\n'
++RELEASE_ARCHIVE="${PATENTSHIELD_RELEASE_ARCHIVE:-$ROOT_DIR/build/releases/PatentShield-release-candidate.zip}"
++printf '\n[1/10] Build and verify the exact sanitized release ZIP\n'
++python scripts/create_release_archive.py "$RELEASE_ARCHIVE" --root "$ROOT_DIR"
++python scripts/verify_release_archive.py "$RELEASE_ARCHIVE"
++python scripts/test_verify_release_archive.py
+ python scripts/verify_dependency_manifest.py --require-hashes
+ python scripts/secure_repository_hygiene.py --strict
+ 
+
+diff --git a/scripts/secure_repository_hygiene.py b/scripts/secure_repository_hygiene.py
+--- a/scripts/secure_repository_hygiene.py
++++ b/scripts/secure_repository_hygiene.py
+@@ -49,6 +49,8 @@
+     parts = path.parts
+     for index, part in enumerate(parts):
+         if part in FORBIDDEN_DIRS:
++            return PurePosixPath(*parts[: index + 1])
++        if part == ".env" or (part.startswith(".env.") and not (part == ".env.example" and index == len(parts) - 1)):
+             return PurePosixPath(*parts[: index + 1])
+ 
+     name = path.name
+
+diff --git a/scripts/create_release_archive.py b/scripts/create_release_archive.py
+--- /dev/null
++++ b/scripts/create_release_archive.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python3
++"""Create a sanitized ZIP from the current worktree for release verification.
++
++Includes tracked, modified, and non-ignored untracked files. Secrets, generated
++artifacts, VCS metadata, dependencies, local databases, and private-key files are
++excluded before the ZIP is written. The resulting archive must still be passed
++through verify_release_archive.py.
++"""
++from __future__ import annotations
++
++import argparse
++import subprocess
++import sys
++import zipfile
++from pathlib import Path, PurePosixPath
++
++from verify_release_archive import reason_for_member
++
++
++def tracked_and_untracked_files(root: Path) -> list[str]:
++    result = subprocess.run(
++        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
++        cwd=root,
++        check=True,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++    )
++    paths = {item.decode("utf-8", "surrogateescape") for item in result.stdout.split(b"\0") if item}
++    return sorted(paths)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("output", help="destination ZIP path")
++    parser.add_argument("--root", default=None, help="repository root (defaults to this script's parent directory)")
++    args = parser.parse_args()
++    root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
++    output = Path(args.output).resolve()
++    if not (root / ".git").exists():
++        parser.error(f"{root} is not a Git working tree")
++    output.parent.mkdir(parents=True, exist_ok=True)
++    try:
++        members = tracked_and_untracked_files(root)
++    except subprocess.CalledProcessError as exc:
++        print(f"Unable to enumerate Git files: {exc.stderr.decode(errors='replace')}", file=sys.stderr)
++        return 2
++
++    written = 0
++    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
++        for rel in members:
++            path = PurePosixPath(rel)
++            if reason_for_member(rel):
++                continue
++            candidate = root / Path(*path.parts)
++            # Reject any symlink component before resolving; resolve() itself
++            # follows links and would otherwise hide the original symlink.
++            if any((root / Path(*path.parts[:index])).is_symlink() for index in range(1, len(path.parts) + 1)):
++                print(f"Skipping symbolic link path: {rel}", file=sys.stderr)
++                continue
++            source = candidate.resolve()
++            try:
++                source.relative_to(root)
++            except ValueError:
++                print(f"Refusing path outside root: {rel}", file=sys.stderr)
++                return 2
++            if not source.is_file():
++                continue
++            if source == output:
++                continue
++            arcname = f"PatentShield/{path.as_posix()}"
++            archive.write(source, arcname=arcname)
++            written += 1
++    print(f"Created sanitized release candidate ({written} files): {output}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+
+diff --git a/scripts/verify_release_archive.py b/scripts/verify_release_archive.py
+--- /dev/null
++++ b/scripts/verify_release_archive.py
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python3
++"""Fail closed when a release ZIP contains environment secrets or build artifacts."""
++from __future__ import annotations
++
++import argparse
++import sys
++import zipfile
++from pathlib import PurePosixPath
++
++FORBIDDEN_COMPONENTS = {
++    ".git",
++    "__pycache__",
++    "node_modules",
++    "dist",
++    ".pytest_cache",
++}
++FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".pyd", ".sqlite3", ".sqlite3-journal"}
++PRIVATE_KEY_NAMES = {
++    "id_rsa", "id_ed25519", "id_ecdsa", "private.key", "private_key.pem",
++}
++
++
++def reason_for_member(name: str) -> str | None:
++    normalized = name.replace("\\", "/")
++    path = PurePosixPath(normalized)
++    if path.is_absolute() or ".." in path.parts:
++        return "unsafe absolute/traversal path"
++    parts = [part.casefold() for part in path.parts]
++    basename = parts[-1] if parts else ""
++    if any(part in FORBIDDEN_COMPONENTS for part in parts):
++        return "forbidden generated or VCS directory"
++    for index, part in enumerate(parts):
++        if part == ".env.example" and index == len(parts) - 1 and not normalized.endswith("/"):
++            continue
++        if part == ".env" or part.startswith(".env."):
++            return "environment file/path (only a .env.example file is permitted)"
++    if path.suffix.casefold() in FORBIDDEN_SUFFIXES:
++        return "compiled bytecode or local database artifact"
++    if basename in PRIVATE_KEY_NAMES or basename.endswith((".pem", ".p12", ".pfx")):
++        return "private-key/certificate bundle must not be shipped in source archive"
++    return None
++
++
++def verify_archive(archive_path: str) -> list[str]:
++    failures: list[str] = []
++    try:
++        with zipfile.ZipFile(archive_path, "r") as archive:
++            seen: set[str] = set()
++            for info in archive.infolist():
++                name = info.filename
++                # Reject Unix symlink entries so extraction cannot introduce
++                # links that later redirect file writes outside the release tree.
++                unix_mode = (info.external_attr >> 16) & 0xFFFF
++                if (unix_mode & 0o170000) == 0o120000:
++                    failures.append(f"{name}: symbolic links are not permitted in release archives")
++                if name in seen:
++                    failures.append(f"{name}: duplicate ZIP member")
++                seen.add(name)
++                reason = reason_for_member(name)
++                if reason:
++                    failures.append(f"{name}: {reason}")
++    except (OSError, zipfile.BadZipFile) as exc:
++        return [f"{archive_path}: cannot read ZIP archive ({type(exc).__name__})"]
++    return failures
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("archive", help="ZIP release artifact to inspect")
++    args = parser.parse_args()
++    failures = verify_archive(args.archive)
++    if failures:
++        print("Release archive verification FAILED:", file=sys.stderr)
++        for failure in failures:
++            print(f"  - {failure}", file=sys.stderr)
++        return 1
++    print(f"Release archive verification passed: {args.archive}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+
+diff --git a/scripts/test_verify_release_archive.py b/scripts/test_verify_release_archive.py
+--- /dev/null
++++ b/scripts/test_verify_release_archive.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++"""Small stdlib regression tests for the release-archive verifier."""
++from __future__ import annotations
++
++import tempfile
++import unittest
++import zipfile
++from pathlib import Path
++
++from verify_release_archive import reason_for_member, verify_archive
++
++
++class ReleaseArchivePolicyTests(unittest.TestCase):
++    def test_env_example_allowed_but_real_env_files_rejected(self):
++        self.assertIsNone(reason_for_member("PatentShield/.env.example"))
++        for name in (".env", "backend/.env", "frontend/.env.production", "x/.env/private.txt"):
++            with self.subTest(name=name):
++                self.assertIsNotNone(reason_for_member(name))
++
++    def test_generated_directories_and_bytecode_are_rejected(self):
++        for name in (
++            "repo/.git/config", "repo/__pycache__/x.pyc", "repo/node_modules/pkg/index.js",
++            "repo/dist/index.js", "repo/.pytest_cache/data", "repo/app.pyc",
++        ):
++            with self.subTest(name=name):
++                self.assertIsNotNone(reason_for_member(name))
++
++    def test_traversal_and_absolute_paths_rejected(self):
++        self.assertIsNotNone(reason_for_member("../escape.txt"))
++        self.assertIsNotNone(reason_for_member("/absolute/path"))
++
++    def test_archive_verification_reports_forbidden_entries(self):
++        with tempfile.TemporaryDirectory() as temp_dir:
++            archive_path = Path(temp_dir) / "candidate.zip"
++            with zipfile.ZipFile(archive_path, "w") as archive:
++                archive.writestr("PatentShield/.env", "not a real credential")
++                archive.writestr("PatentShield/src/app.py", "print('ok')")
++            failures = verify_archive(str(archive_path))
++            self.assertEqual(len(failures), 1)
++            self.assertIn(".env", failures[0])
++
++    def test_safe_archive_passes(self):
++        with tempfile.TemporaryDirectory() as temp_dir:
++            archive_path = Path(temp_dir) / "candidate.zip"
++            with zipfile.ZipFile(archive_path, "w") as archive:
++                archive.writestr("PatentShield/.env.example", "DJANGO_DEBUG=False\n")
++                archive.writestr("PatentShield/backend/manage.py", "pass\n")
++            self.assertEqual(verify_archive(str(archive_path)), [])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+
+diff --git a/docs/RELEASE_HYGIENE.md b/docs/RELEASE_HYGIENE.md
+--- /dev/null
++++ b/docs/RELEASE_HYGIENE.md
+@@ -0,0 +1,33 @@
++# Release archive hygiene
++
++Never distribute a ZIP made by zipping the checkout directory. It can include populated `.env` files, `.git`, dependencies, test caches, bytecode, and build output.
++
++## Preferred release from a reviewed commit
++
++`git archive` includes only tracked files from the selected commit. It is safe only after the secret/generated-file check passes and credentials have been rotated; it cannot remove secrets from Git history by itself.
++
++```bash
++mkdir -p build/releases
++python scripts/secure_repository_hygiene.py --strict
++git archive --format=zip --prefix=PatentShield/ -o build/releases/PatentShield.zip HEAD
++python scripts/verify_release_archive.py build/releases/PatentShield.zip
++```
++
++## Sanitized export of a worktree
++
++To include reviewed local modifications before committing them, use the allowlisted exporter. It enumerates tracked and non-ignored untracked files but filters secret environment files, VCS directories, caches, dependency trees, generated output, bytecode, private keys, and local database artifacts. The verifier then independently inspects the actual ZIP.
++
++```bash
++python scripts/create_release_archive.py build/releases/PatentShield-release-candidate.zip
++python scripts/verify_release_archive.py build/releases/PatentShield-release-candidate.zip
++```
++
++The release gate performs these steps automatically and also runs `secure_repository_hygiene.py --strict`. If the repository index still tracks `.env` or generated output, that check intentionally blocks the release until the paths are untracked. For example:
++
++```bash
++git rm --cached -- .env backend/.env frontend/.env
++# inspect and untrack any further findings printed by secure_repository_hygiene.py
++python scripts/secure_repository_hygiene.py --strict
++```
++
++Keep local secret files on disk only when needed, but do not commit them. Rotate any real credentials that have ever entered a ZIP or Git history. Use a reviewed history-rewrite procedure if policy requires removing historical secret blobs; a new clean archive does not erase old Git objects or prior distributions.
+

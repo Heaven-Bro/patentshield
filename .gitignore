@@ -47,3 +47,6 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Sanitized release candidates created by scripts/release_gate.sh
+/build/

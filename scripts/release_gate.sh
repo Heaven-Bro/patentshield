@@ -13,7 +13,11 @@ if [[ "${PATENTSHIELD_RUN_REAL_ML_SLA:-0}" == "1" ]]; then
   export PATENTSHIELD_BUILD_ML_WORKER="${PATENTSHIELD_BUILD_ML_WORKER:-1}"
 fi
 
-printf '\n[1/10] Verify pinned/hash-locked dependencies and repository hygiene\n'
+RELEASE_ARCHIVE="${PATENTSHIELD_RELEASE_ARCHIVE:-$ROOT_DIR/build/releases/PatentShield-release-candidate.zip}"
+printf '\n[1/10] Build and verify the exact sanitized release ZIP\n'
+python scripts/create_release_archive.py "$RELEASE_ARCHIVE" --root "$ROOT_DIR"
+python scripts/verify_release_archive.py "$RELEASE_ARCHIVE"
+python scripts/test_verify_release_archive.py
 python scripts/verify_dependency_manifest.py --require-hashes
 python scripts/secure_repository_hygiene.py --strict
 

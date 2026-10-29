@@ -50,6 +50,8 @@ def offending_root(path: PurePosixPath) -> PurePosixPath | None:
     for index, part in enumerate(parts):
         if part in FORBIDDEN_DIRS:
             return PurePosixPath(*parts[: index + 1])
+        if part == ".env" or (part.startswith(".env.") and not (part == ".env.example" and index == len(parts) - 1)):
+            return PurePosixPath(*parts[: index + 1])
 
     name = path.name
     if is_secret_env_name(name) or name in PRIVATE_KEY_NAMES:

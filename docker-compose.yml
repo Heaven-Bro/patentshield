@@ -8,8 +8,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-patentshield}
       POSTGRES_USER: ${POSTGRES_USER:-patentshield}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env file}
+    # Local loopback only; production deployments should remove host port publishing.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +24,9 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
+    # Local loopback only; production deployments should remove host port publishing.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -50,8 +52,9 @@ services:
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
       CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
     command: ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
+    # Bind only to loopback; production should route through a TLS ingress/proxy.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
     depends_on:
