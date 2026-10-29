@@ -25,7 +25,7 @@ function friendlyError(error) {
 
 function Card({ title, subtitle, children, className = "" }) {
   return (
-    <section className={`rounded-2xl border border-slate-200 bg-white p-5 shadow-sm ${className}`}>
+    <section className={`ps-panel ${className}`}>
       <div className="mb-4">
         <h2 className="text-base font-semibold text-slate-950">{title}</h2>
         {subtitle && <p className="mt-1 text-sm leading-5 text-slate-500">{subtitle}</p>}
@@ -44,9 +44,9 @@ function Field({ label, children }) {
   );
 }
 
-const inputClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100";
-const buttonClass = "inline-flex items-center justify-center rounded-lg bg-indigo-700 px-3.5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50";
-const secondaryButtonClass = "inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
+const inputClass = "ps-input";
+const buttonClass = "ps-button-primary";
+const secondaryButtonClass = "ps-button-secondary";
 
 function StateBadge({ value }) {
   const styles = {
@@ -227,7 +227,7 @@ export default function SurveillanceDashboard({ tenant }) {
   }
 
   return (
-    <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    <main className="ps-page">
       <div className="mb-7 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-700">IP intelligence · Phase 3</p>
@@ -241,8 +241,8 @@ export default function SurveillanceDashboard({ tenant }) {
         </button>
       </div>
 
-      {error && <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{error}</div>}
-      {notice && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status">{notice}</div>}
+      {error && <div className="mb-4 ps-alert-error" role="alert">{error}</div>}
+      {notice && <div className="mb-4 ps-alert-success" role="status">{notice}</div>}
 
       <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
@@ -251,7 +251,7 @@ export default function SurveillanceDashboard({ tenant }) {
           ["Destinations", destinations.filter((destination) => destination.is_active).length],
           ["Delivery issues", deliveries.filter((delivery) => ["RETRYING", "DEAD_LETTER", "FAILED"].includes(delivery.status)).length],
         ].map(([label, value]) => (
-          <div key={label} className="rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+          <div key={label} className="ps-metric-card">
             <p className="text-xs font-medium text-slate-500">{label}</p>
             <p className="mt-1 text-2xl font-bold text-slate-950">{value}</p>
           </div>

@@ -310,12 +310,12 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
   if (!analysisId || !tenantId) return null;
 
   return (
-    <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6" aria-label="Attorney claim chart and evidence matrix">
+    <section className="ps-panel mt-5" aria-label="Attorney claim chart and evidence matrix">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.15em] text-indigo-700">Attorney work product</p>
-          <h2 className="mt-1 text-xl font-semibold text-slate-950">Claim chart & evidence matrix</h2>
-          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">Create a versioned, editable chart from persisted limitation assessments. Evidence quotations and source identifiers remain attached to each row.</p>
+          <p className="ps-eyebrow">Attorney work product</p>
+          <h2 className="mt-1 text-xl font-bold tracking-tight text-slate-950">Claim chart & evidence matrix</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Create a versioned, editable chart from persisted limitation assessments. Evidence quotations and source identifiers remain attached to each row.</p>
         </div>
         <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700">{chart ? `Revision ${chart.revision}` : "Not created"}</span>
       </div>
@@ -354,15 +354,15 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
               <label htmlFor="claim-chart-title" className="mb-1 block text-xs font-semibold text-slate-700">New chart title (optional)</label>
               <input id="claim-chart-title" value={chartTitle} onChange={(event) => setChartTitle(event.target.value)} maxLength={240} placeholder="e.g. Product sensor claim chart" className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
             </div>
-            <button type="submit" disabled={busy === "create" || loading} className="rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-800 disabled:opacity-50">{busy === "create" ? "Creating…" : "Create from analysis"}</button>
+            <button type="submit" disabled={busy === "create" || loading} className="ps-button-primary">{busy === "create" ? "Creating…" : "Create from analysis"}</button>
           </form>
         )}
         {chart && (
           <div className="flex flex-wrap gap-2">
-            {chart.status === "DRAFT" && canEdit && <button type="button" onClick={() => void updateChartStatus("IN_REVIEW")} disabled={busy === "status"} className="rounded-lg border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-700 disabled:opacity-40">Submit for review</button>}
-            {chart.status === "IN_REVIEW" && canEdit && <button type="button" onClick={() => void updateChartStatus("DRAFT")} disabled={busy === "status"} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-40">Return to draft</button>}
-            {chart.status === "IN_REVIEW" && canApprove && <button type="button" onClick={() => void updateChartStatus("APPROVED")} disabled={busy === "status" || rows.some((row) => !row.attorney_decision || row.attorney_decision === "UNREVIEWED")} title={rows.some((row) => !row.attorney_decision || row.attorney_decision === "UNREVIEWED") ? "Record an attorney decision for every limitation before approval." : "Approve this reviewed claim chart."} className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Approve chart</button>}
-            {chart.status !== "ARCHIVED" && canEdit && <button type="button" onClick={() => void updateChartStatus("ARCHIVED")} disabled={busy === "status"} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-40">Archive</button>}
+            {chart.status === "DRAFT" && canEdit && <button type="button" onClick={() => void updateChartStatus("IN_REVIEW")} disabled={busy === "status"} className="ps-button-secondary !border-indigo-200 !bg-indigo-50 !px-3 !py-2 !text-indigo-800 disabled:opacity-40">Submit for review</button>}
+            {chart.status === "IN_REVIEW" && canEdit && <button type="button" onClick={() => void updateChartStatus("DRAFT")} disabled={busy === "status"} className="ps-button-secondary !px-3 !py-2 disabled:opacity-40">Return to draft</button>}
+            {chart.status === "IN_REVIEW" && canApprove && <button type="button" onClick={() => void updateChartStatus("APPROVED")} disabled={busy === "status" || rows.some((row) => !row.attorney_decision || row.attorney_decision === "UNREVIEWED")} title={rows.some((row) => !row.attorney_decision || row.attorney_decision === "UNREVIEWED") ? "Record an attorney decision for every limitation before approval." : "Approve this reviewed claim chart."} className="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-3.5 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">Approve chart</button>}
+            {chart.status !== "ARCHIVED" && canEdit && <button type="button" onClick={() => void updateChartStatus("ARCHIVED")} disabled={busy === "status"} className="ps-button-secondary !px-3 !py-2 disabled:opacity-40">Archive</button>}
           </div>
         )}
       </div>
@@ -376,7 +376,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
             </div>
             <div className="flex flex-wrap gap-2">
               {EXPORT_FORMATS.map((format) => (
-                <button key={format} type="button" onClick={() => void startExport(format)} disabled={!canReview || Boolean(busy.startsWith("export:")) || EXPORT_ACTIVE.has(activeExport?.status)} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-300">{busy === `export:${format}` ? "Queueing…" : `Export ${format}`}</button>
+                <button key={format} type="button" onClick={() => void startExport(format)} disabled={!canReview || Boolean(busy.startsWith("export:")) || EXPORT_ACTIVE.has(activeExport?.status)} className="ps-button-primary bg-slate-900 hover:bg-slate-800">{busy === `export:${format}` ? "Queueing…" : `Export ${format}`}</button>
               ))}
             </div>
           </div>
@@ -391,9 +391,9 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
             </div>
           )}
 
-          <div className="mt-5 overflow-x-auto rounded-xl border border-slate-200">
-            <table className="min-w-[1050px] w-full border-collapse text-left text-sm">
-              <thead className="bg-slate-900 text-xs uppercase tracking-wide text-white">
+          <div className="ps-table-wrap mt-5 max-h-[72vh] overflow-y-auto">
+            <table className="ps-table min-w-[1050px]">
+              <thead className="sticky top-0 z-10 bg-slate-900 text-xs uppercase tracking-wide text-slate-200">
                 <tr>
                   <th className="px-3 py-3">Limitation</th>
                   <th className="px-3 py-3">Assessment</th>

@@ -8,11 +8,45 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "prepare_pg_service.py"
+
+def _resolve_script_path() -> Path:
+    """Locate prepare_pg_service.py safely across host and container environments."""
+    current = Path(__file__).resolve()
+
+    # 1. Standard pathlib resolution relative to file structure
+    candidates = [
+        current.parents[2] / "scripts" / "prepare_pg_service.py",
+        current.parents[1] / "scripts" / "prepare_pg_service.py",
+        current.parent / "scripts" / "prepare_pg_service.py",
+        Path.cwd() / "scripts" / "prepare_pg_service.py",
+        Path.cwd() / "backend" / "scripts" / "prepare_pg_service.py",
+        Path("/app/scripts/prepare_pg_service.py"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    # 2. Try Django settings only if configured
+    try:
+        from django.conf import settings
+        if settings.configured:
+            base = Path(settings.BASE_DIR)
+            for p in [base, base.parent]:
+                candidate = p / "scripts" / "prepare_pg_service.py"
+                if candidate.is_file():
+                    return candidate
+    except Exception:
+        pass
+
+    return current.parents[2] / "scripts" / "prepare_pg_service.py"
+
+
+SCRIPT = _resolve_script_path()
 
 
 class PostgreSQLServiceFileTests(unittest.TestCase):
     def test_password_is_written_to_restricted_file_not_stdout(self) -> None:
+        self.assertTrue(SCRIPT.is_file(), f"Script not found at {SCRIPT}.")
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "pg_service.conf"
             result = subprocess.run(
@@ -31,6 +65,7 @@ class PostgreSQLServiceFileTests(unittest.TestCase):
             self.assertIn('sslmode="verify-full"', text)
 
     def test_rejects_unsupported_query_options(self) -> None:
+        self.assertTrue(SCRIPT.is_file(), f"Script not found at {SCRIPT}.")
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "pg_service.conf"
             result = subprocess.run(

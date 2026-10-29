@@ -1,3 +1,184 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html {
+    @apply min-h-full scroll-smooth bg-slate-100;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-100 font-sans text-slate-900 antialiased;
+    font-feature-settings: "ss01" on, "cv11" on;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button:focus-visible,
+  a:focus-visible {
+    @apply outline-none ring-4 ring-indigo-100 ring-offset-2 ring-offset-white;
+  }
+
+  ::selection {
+    @apply bg-indigo-100 text-indigo-950;
+  }
+
+  * {
+    scrollbar-color: #cbd5e1 transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@layer components {
+  .ps-page {
+    @apply mx-auto w-full max-w-[1800px] space-y-6 px-4 py-6 sm:px-6 sm:py-7 xl:px-8;
+  }
+
+  .ps-hero {
+    @apply relative isolate overflow-hidden rounded-3xl border border-slate-800/70 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 p-6 text-white shadow-xl shadow-slate-950/10 sm:p-8;
+  }
+
+  .ps-hero::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    top: -5rem;
+    right: -4rem;
+    width: 18rem;
+    height: 18rem;
+    border-radius: 9999px;
+    background: radial-gradient(circle, rgba(99, 102, 241, .18), rgba(99, 102, 241, 0) 68%);
+    pointer-events: none;
+  }
+
+  .ps-eyebrow {
+    @apply text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-600;
+  }
+
+  .ps-panel {
+    @apply rounded-2xl border border-slate-200/90 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.035)] transition duration-200 sm:p-6;
+  }
+
+  .ps-panel-hover {
+    @apply rounded-2xl border border-slate-200/90 bg-white p-5 shadow-panel transition duration-200 hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-float sm:p-6;
+  }
+
+  .ps-panel-title {
+    @apply text-sm font-bold tracking-tight text-slate-950 sm:text-base;
+  }
+
+  .ps-panel-description {
+    @apply mt-1 text-xs leading-5 text-slate-500 sm:text-sm;
+  }
+
+  .ps-input {
+    @apply w-full rounded-xl border border-slate-300/90 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm shadow-slate-900/[0.02] outline-none transition duration-150 placeholder:text-slate-400 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500;
+  }
+
+  .ps-button-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-transparent bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-indigo-700/15 transition duration-150 hover:-translate-y-px hover:bg-indigo-700 hover:shadow-md hover:shadow-indigo-700/20 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .ps-button-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 shadow-sm transition duration-150 hover:-translate-y-px hover:border-indigo-200 hover:bg-indigo-50/60 hover:text-indigo-800 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .ps-button-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-bold text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .ps-status-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ring-1 ring-inset ring-transparent transition-colors;
+  }
+
+  .ps-metric-card {
+    @apply relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition duration-200 hover:border-indigo-200 hover:shadow-md hover:shadow-slate-900/5 sm:p-5;
+  }
+
+  .ps-metric-label {
+    @apply text-[10px] font-bold uppercase tracking-[0.13em] text-slate-500;
+  }
+
+  .ps-metric-value {
+    @apply mt-2 text-2xl font-bold tracking-tight text-slate-950 tabular-nums sm:text-3xl;
+  }
+
+  .ps-alert-error {
+    @apply rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-5 text-rose-800;
+  }
+
+  .ps-alert-success {
+    @apply rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-5 text-emerald-800;
+  }
+
+  .ps-alert-warning {
+    @apply rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-5 text-amber-900;
+  }
+
+  .ps-table-wrap {
+    @apply overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-900/[0.02];
+  }
+
+  .ps-table {
+    @apply min-w-full border-collapse text-left text-sm;
+  }
+
+  .ps-table thead {
+    @apply sticky top-0 z-10 bg-slate-900 text-xs uppercase tracking-wider text-slate-200;
+  }
+
+  .ps-table thead th {
+    @apply whitespace-nowrap px-4 py-3.5 font-bold;
+  }
+
+  .ps-table tbody tr {
+    @apply border-t border-slate-100 transition-colors hover:bg-indigo-50/40;
+  }
+
+  .ps-table tbody td {
+    @apply px-4 py-3.5 align-top text-slate-700;
+  }
+
+  .ps-skeleton {
+    @apply animate-pulse rounded-xl bg-gradient-to-r from-slate-100 via-slate-200 to-slate-100;
+  }
+
+  .ps-empty-state {
+    @apply rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm leading-6 text-slate-500;
+  }
+
+  .ps-page input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  .ps-page select,
+  .ps-page textarea {
+    @apply rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm shadow-slate-900/[0.02] outline-none transition duration-150 placeholder:text-slate-400;
+  }
+
+  .ps-page input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+  .ps-page select:focus,
+  .ps-page textarea:focus {
+    @apply border-indigo-500 ring-4 ring-indigo-100;
+  }
+
+  .ps-page input:disabled,
+  .ps-page select:disabled,
+  .ps-page textarea:disabled {
+    @apply cursor-not-allowed bg-slate-100 text-slate-500;
+  }
+
+  .ps-page button:not(:disabled) {
+    @apply transition duration-150;
+  }
+}

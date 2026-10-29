@@ -9,11 +9,38 @@ import MultilingualSearch from "./components/MultilingualSearch";
 import FTOWorkspace from "./components/FTOWorkspace";
 import LandscapeAnalytics from "./components/LandscapeAnalytics";
 import EnterpriseAdminConsole from "./components/EnterpriseAdminConsole";
+import PortfolioValuation from "./components/PortfolioValuation";
 import TenantSwitcher from "./components/TenantSwitcher";
 import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
 import { useDocumentStore } from "./stores/documentStore";
 import { useMatrixStore } from "./stores/matrixStore";
+
+const NAV_ITEMS = [
+  { id: "workspace", label: "IP workspace", description: "Library & analysis", heading: "Patent intelligence workspace", summary: "Review source documents, run prior-art analysis, and manage evidence.", icon: "workspace" },
+  { id: "office-actions", label: "Prosecution", description: "Office action response", icon: "prosecution" },
+  { id: "surveillance", label: "Surveillance", description: "Competitor monitoring", icon: "surveillance" },
+  { id: "multilingual-search", label: "CJK search", description: "Cross-lingual retrieval", icon: "search" },
+  { id: "fto", label: "FTO mapping", description: "Product-to-claim review", icon: "mapping" },
+  { id: "landscape", label: "Landscape", description: "Technology intelligence", icon: "landscape" },
+  { id: "portfolio-valuation", label: "Valuation", description: "Portfolio diligence", icon: "valuation" },
+  { id: "enterprise-admin", label: "Enterprise admin", description: "Identity & governance", icon: "admin" },
+];
+
+const NAV_ICON_PATHS = {
+  workspace: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
+  prosecution: "M8 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3 M8 2h8v4H8z M7 12h10 M7 16h7",
+  surveillance: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+  search: "M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15z M16 16l5 5",
+  mapping: "M4 5h16 M4 12h16 M4 19h16 M8 2v6 M16 9v6 M10 16v6",
+  landscape: "M3 20V5 M3 20h18 M7 16l4-5 3 2 5-7",
+  valuation: "M4 5h16 M4 12h16 M4 19h16 M7 3v4 M12 10v4 M17 17v4",
+  admin: "M12 3l8 4v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V7l8-4z M9 12l2 2 4-4",
+};
+
+function NavIcon({ name }) {
+  return <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={NAV_ICON_PATHS[name] || NAV_ICON_PATHS.workspace} /></svg>;
+}
 
 /**
  * Root authentication gate and tenant-aware application shell.
@@ -38,6 +65,7 @@ export default function App() {
   const [patents, setPatents] = useState([]);
   const [patentsLoading, setPatentsLoading] = useState(false);
   const [patentsError, setPatentsError] = useState("");
+  const [apiStatus, setApiStatus] = useState("checking");
   const [refreshCounter, setRefreshCounter] = useState(0);
   const [activeSection, setActiveSection] = useState("workspace");
 
@@ -93,6 +121,7 @@ export default function App() {
 
   const loadPatents = useCallback(async (signal) => {
     setPatentsLoading(true);
+    setApiStatus("checking");
     setPatentsError("");
     try {
       const response = await apiRequest("/api/v1/patents/", {
@@ -101,9 +130,11 @@ export default function App() {
       });
       if (signal?.aborted || useAuthStore.getState().activeTenantId !== activeTenantId) return;
       setPatents(Array.isArray(response.results) ? response.results : []);
+      setApiStatus("online");
     } catch (error) {
       if (error?.name === "AbortError" || signal?.aborted) return;
       if (useAuthStore.getState().activeTenantId !== activeTenantId) return;
+      setApiStatus("offline");
       if (error instanceof ApiError && error.status === 401) {
         setPatents([]);
         setPatentsError("");
@@ -163,6 +194,7 @@ export default function App() {
     setPatents([]);
     setPatentsError("");
     setPatentsLoading(false);
+    setApiStatus("checking");
     setActiveSection("workspace");
     resetWorkspaceState();
     setActiveTenant(tenantId);
@@ -242,136 +274,146 @@ export default function App() {
     return <LoginPage onSubmit={handleLogin} busy={loginBusy} error={loginError} />;
   }
 
+  const activeNavItem = NAV_ITEMS.find((item) => item.id === activeSection) || NAV_ITEMS[0];
+  const displayName = user?.full_name || user?.username || user?.email || "PatentShield user";
+  const avatarLabel = displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "P";
+  const apiBadge = apiStatus === "offline"
+    ? { label: "API unavailable", tone: "border-rose-200 bg-rose-50 text-rose-700", dot: "bg-rose-500" }
+    : apiStatus === "checking" || patentsLoading
+      ? { label: "Syncing API", tone: "border-amber-200 bg-amber-50 text-amber-700", dot: "bg-amber-500" }
+      : { label: "API connected", tone: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" };
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+    <div className="min-h-screen bg-slate-100 text-slate-900 lg:flex">
+      <aside className="relative z-30 flex w-full flex-col bg-slate-950 text-white shadow-xl shadow-slate-950/10 lg:sticky lg:top-0 lg:h-screen lg:w-[276px] lg:shrink-0">
+        <div className="flex items-center justify-between gap-3 px-5 pb-4 pt-5 lg:block lg:pb-5">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 font-black text-white shadow-sm">P</div>
-            <div>
-              <p className="text-sm font-bold tracking-tight text-slate-950">PatentShield</p>
-              <p className="text-xs text-slate-500">Enterprise IP analysis workspace</p>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-indigo-300/20 bg-gradient-to-br from-indigo-500 to-blue-600 text-lg font-black text-white shadow-lg shadow-indigo-950/40">P</div>
+            <div className="min-w-0">
+              <p className="text-[15px] font-bold tracking-tight text-white">PatentShield</p>
+              <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">IP intelligence suite</p>
             </div>
           </div>
+          <span className="hidden rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300 sm:inline-flex lg:hidden">Secure session</span>
+        </div>
 
-          <div className="grid gap-4 sm:grid-cols-[minmax(240px,1fr)_auto] sm:items-end lg:min-w-[540px]">
-            <TenantSwitcher
-              tenants={tenants}
-              value={activeTenantId}
-              onChange={handleTenantChange}
-              disabled={logoutBusy}
-            />
-            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-              <button
-                type="button"
-                onClick={() => setActiveSection("workspace")}
-                aria-pressed={activeSection === "workspace"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "workspace" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >Workspace</button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("office-actions")}
-                aria-pressed={activeSection === "office-actions"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "office-actions" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >Prosecution</button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("surveillance")}
-                aria-pressed={activeSection === "surveillance"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "surveillance" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >Surveillance</button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("multilingual-search")}
-                aria-pressed={activeSection === "multilingual-search"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "multilingual-search" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >CJK Search</button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("fto")}
-                aria-pressed={activeSection === "fto"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "fto" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >FTO Mapping</button>
-              <button
-                type="button"
-                onClick={() => setActiveSection("landscape")}
-                aria-pressed={activeSection === "landscape"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "landscape" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >Landscape</button>
-              {activeTenant && ["OWNER", "ADMIN"].includes(activeTenant.role) && <button
-                type="button"
-                onClick={() => setActiveSection("enterprise-admin")}
-                aria-pressed={activeSection === "enterprise-admin"}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${activeSection === "enterprise-admin" ? "bg-indigo-700 text-white" : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
-              >Enterprise Admin</button>}
-              <div className="flex items-center justify-between gap-3 sm:justify-end">
-              <div className="min-w-0 text-right">
-                <p className="max-w-48 truncate text-sm font-semibold text-slate-800">{user?.full_name || user?.username}</p>
-                <p className="max-w-48 truncate text-xs text-slate-500">{user?.email || user?.username}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => void handleLogout()}
-                disabled={logoutBusy}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-              >
-                {logoutBusy ? "Signing out…" : "Sign out"}
-              </button>
-              </div>
-            </div>
+        <div className="px-4 pb-4 lg:pb-5">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.045] p-3.5 shadow-inner shadow-black/10">
+            <p className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" /> Workspace context
+            </p>
+            <TenantSwitcher tenants={tenants} value={activeTenantId} onChange={handleTenantChange} disabled={logoutBusy} dark id="sidebar-tenant-switcher" />
           </div>
         </div>
-        {logoutError && <div className="border-t border-rose-100 bg-rose-50 px-4 py-2 text-center text-xs text-rose-800" role="alert">{logoutError}</div>}
-      </header>
 
-      {tenants.length === 0 ? (
-        <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6">
-            <h1 className="text-lg font-semibold text-amber-950">No active tenant memberships</h1>
-            <p className="mt-2 text-sm leading-6 text-amber-900">Your account is signed in, but no active workspace memberships were returned. Ask a PatentShield workspace owner to invite you or reactivate your membership.</p>
+        <div className="px-4 pb-2 pt-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">Workspaces</div>
+        <nav className="flex gap-1.5 overflow-x-auto px-3 pb-4 lg:flex-1 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto" aria-label="Primary navigation">
+          {NAV_ITEMS.filter((item) => item.id !== "enterprise-admin" || (activeTenant && ["OWNER", "ADMIN"].includes(activeTenant.role))).map((item) => {
+            const isActive = activeSection === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveSection(item.id)}
+                aria-current={isActive ? "page" : undefined}
+                aria-pressed={isActive}
+                className={`group relative flex min-w-max items-center gap-3 rounded-xl px-3 py-2.5 text-left text-xs font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 lg:w-full lg:px-3.5 lg:text-sm ${isActive ? "bg-indigo-500/15 text-white shadow-sm ring-1 ring-inset ring-indigo-400/25" : "text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"}`}
+              >
+                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${isActive ? "bg-indigo-500 text-white shadow-md shadow-indigo-950/30" : "bg-white/[0.045] text-slate-400 group-hover:bg-white/10 group-hover:text-slate-200"}`} aria-hidden="true">
+                  <NavIcon name={item.icon} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block whitespace-nowrap">{item.label}</span>
+                  <span className={`mt-0.5 hidden text-[10px] font-normal lg:block ${isActive ? "text-indigo-200" : "text-slate-500"}`}>{item.description}</span>
+                </span>
+                {isActive && <span className="hidden h-1.5 w-1.5 rounded-full bg-indigo-300 lg:block" />}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="hidden border-t border-white/10 p-4 lg:block">
+          <div className="flex items-center gap-3 rounded-xl px-2 py-2">
+            <span className={`h-2 w-2 rounded-full ${apiBadge.dot} ${apiStatus === "checking" || patentsLoading ? "animate-pulse" : ""}`} />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-slate-200">{apiBadge.label}</p>
+              <p className="mt-0.5 text-[10px] text-slate-500">Tenant-scoped session</p>
+            </div>
+            <span className="rounded-md border border-white/10 px-1.5 py-1 text-[9px] font-bold tracking-wider text-slate-500">TLS</span>
           </div>
-        </main>
-      ) : !activeTenant ? (
-        <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
-          <div className="rounded-2xl border border-indigo-100 bg-white p-7 shadow-sm">
-            <h1 className="text-xl font-semibold text-slate-950">Choose a workspace</h1>
-            <p className="mt-2 text-sm leading-6 text-slate-500">Your account belongs to multiple tenants. Select the workspace you intend to access before loading any tenant-owned data.</p>
-            <div className="mt-5 max-w-lg">
-              <TenantSwitcher tenants={tenants} value={activeTenantId} onChange={handleTenantChange} />
+        </div>
+      </aside>
+
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_2px_rgba(15,23,42,0.03)] backdrop-blur-xl">
+          <div className="flex flex-col gap-3 px-4 py-3.5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
+                <span>PatentShield</span><span className="text-slate-300">/</span><span className="text-indigo-600">{activeNavItem.label}</span>
+              </div>
+              <h1 className="mt-1 text-lg font-bold tracking-tight text-slate-950 sm:text-xl">{activeNavItem.heading || activeNavItem.label}</h1>
+              <p className="mt-0.5 hidden text-xs text-slate-500 sm:block">{activeTenant?.name ? `${activeTenant.name} · ` : ""}{activeNavItem.summary || activeNavItem.description}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5 sm:justify-between lg:justify-end">
+              <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold ${apiBadge.tone}`} role="status" aria-live="polite">
+                <span className={`h-1.5 w-1.5 rounded-full ${apiBadge.dot} ${apiStatus === "checking" || patentsLoading ? "animate-pulse" : ""}`} />
+                <span className="hidden sm:inline">{apiBadge.label}</span><span className="sm:hidden">{apiStatus === "offline" ? "Offline" : apiStatus === "checking" || patentsLoading ? "Syncing" : "Connected"}</span>
+              </div>
+              <div className="hidden h-7 w-px bg-slate-200 sm:block" />
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-800 to-indigo-900 text-xs font-bold text-white shadow-sm" aria-label={`Avatar for ${displayName}`}>{avatarLabel}</div>
+                <div className="min-w-0">
+                  <p className="max-w-44 truncate text-xs font-bold text-slate-900 sm:text-sm">{displayName}</p>
+                  <p className="max-w-44 truncate text-[10px] text-slate-500 sm:text-xs">{user?.email || user?.username}</p>
+                </div>
+              </div>
+              <button type="button" onClick={() => void handleLogout()} disabled={logoutBusy} className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50">
+                {logoutBusy ? "Signing out…" : "Sign out"}
+              </button>
             </div>
           </div>
-        </main>
-      ) : activeSection === "surveillance" ? (
-        <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
-      ) : activeSection === "office-actions" ? (
-        <OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />
-      ) : activeSection === "multilingual-search" ? (
-        <MultilingualSearch key={activeTenant.id} tenant={activeTenant} />
-      ) : activeSection === "fto" ? (
-        <FTOWorkspace key={activeTenant.id} tenant={activeTenant} patents={patents} />
-      ) : activeSection === "landscape" ? (
-        <LandscapeAnalytics key={activeTenant.id} tenant={activeTenant} />
-      ) : activeSection === "enterprise-admin" && ["OWNER", "ADMIN"].includes(activeTenant.role) ? (
-        <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
-      ) : (
-        <>
-          <PatentsDashboard
-            tenant={activeTenant}
-            patents={patents}
-            loading={patentsLoading}
-            error={patentsError}
-            onRetry={refreshPatentLibrary}
-            onRefresh={refreshPatentLibrary}
-            onUploadSubmitted={refreshPatentLibrary}
-          />
-          <AnalysisConsole
-            key={activeTenant.id}
-            tenant={activeTenant}
-            patents={patents}
-            onRefreshPatents={refreshPatentLibrary}
-          />
-        </>
-      )}
+          {logoutError && <div className="border-t border-rose-200 bg-rose-50 px-4 py-2 text-center text-xs text-rose-800" role="alert">{logoutError}</div>}
+        </header>
+
+        <div className="min-w-0 flex-1">
+          {tenants.length === 0 ? (
+            <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-amber-950">No active tenant memberships</h2>
+                <p className="mt-2 text-sm leading-6 text-amber-900">Your account is signed in, but no active workspace memberships were returned. Ask a PatentShield workspace owner to invite you or reactivate your membership.</p>
+              </div>
+            </main>
+          ) : !activeTenant ? (
+            <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
+              <div className="rounded-2xl border border-indigo-100 bg-white p-7 shadow-lg shadow-indigo-950/5">
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-600">Workspace selection</p>
+                <h2 className="mt-2 text-xl font-semibold text-slate-950">Choose a workspace</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-500">Your account belongs to multiple tenants. Select the workspace you intend to access before loading any tenant-owned data.</p>
+                <div className="mt-5 max-w-lg"><TenantSwitcher tenants={tenants} value={activeTenantId} onChange={handleTenantChange} /></div>
+              </div>
+            </main>
+          ) : activeSection === "surveillance" ? (
+            <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
+          ) : activeSection === "office-actions" ? (
+            <OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />
+          ) : activeSection === "multilingual-search" ? (
+            <MultilingualSearch key={activeTenant.id} tenant={activeTenant} />
+          ) : activeSection === "fto" ? (
+            <FTOWorkspace key={activeTenant.id} tenant={activeTenant} patents={patents} />
+          ) : activeSection === "landscape" ? (
+            <LandscapeAnalytics key={activeTenant.id} tenant={activeTenant} />
+          ) : activeSection === "portfolio-valuation" ? (
+            <PortfolioValuation key={activeTenant.id} tenant={activeTenant} />
+          ) : activeSection === "enterprise-admin" && ["OWNER", "ADMIN"].includes(activeTenant.role) ? (
+            <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
+          ) : (
+            <>
+              <PatentsDashboard tenant={activeTenant} patents={patents} loading={patentsLoading} error={patentsError} onRetry={refreshPatentLibrary} onRefresh={refreshPatentLibrary} onUploadSubmitted={refreshPatentLibrary} />
+              <AnalysisConsole key={activeTenant.id} tenant={activeTenant} patents={patents} onRefreshPatents={refreshPatentLibrary} />
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -3,9 +3,9 @@ import { useCallback, useState } from "react";
 import { ApiError, apiRequest } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/multilingual-search";
-const inputClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100";
-const primaryButton = "inline-flex items-center justify-center rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50";
-const secondaryButton = "inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
+const inputClass = "ps-input";
+const primaryButton = "ps-button-primary";
+const secondaryButton = "ps-button-secondary";
 
 const languageNames = {
   en: "English",
@@ -90,8 +90,8 @@ export default function MultilingualSearch({ tenant }) {
   }
 
   return (
-    <main className="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
-      <section className="overflow-hidden rounded-2xl bg-slate-950 p-6 text-white shadow-sm sm:p-8">
+    <main className="ps-page">
+      <section className="ps-hero">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-300">Phase 5 · Cross-lingual retrieval</p>
         <div className="mt-3 grid gap-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
           <div>
@@ -105,7 +105,7 @@ export default function MultilingualSearch({ tenant }) {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <section className="ps-panel">
         <form onSubmit={search} className="space-y-4">
           <label className="block">
             <span className="mb-1.5 block text-sm font-semibold text-slate-800">Patent query</span>
@@ -142,8 +142,8 @@ export default function MultilingualSearch({ tenant }) {
         </form>
       </section>
 
-      {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</div>}
-      {notice && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</div>}
+      {error && <div role="alert" className="ps-alert-error">{error}</div>}
+      {notice && <div role="status" className="ps-alert-success">{notice}</div>}
 
       {queryMetadata && (
         <section className="rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm text-indigo-950">
@@ -166,7 +166,7 @@ export default function MultilingualSearch({ tenant }) {
         {results.map((result, index) => {
           const translation = translations[result.chunk_id];
           return (
-            <article key={result.chunk_id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+            <article key={result.chunk_id} className="ps-panel">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Result {index + 1} · {result.section_type}{result.claim_number ? ` · Claim ${result.claim_number}` : ""}</p>

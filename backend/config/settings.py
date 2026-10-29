@@ -21,6 +21,9 @@ REPOSITORY_ROOT = BASE_DIR.parent
 load_dotenv(REPOSITORY_ROOT / ".env", override=False)
 load_dotenv(BASE_DIR / ".env", override=False)
 
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -140,6 +143,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",

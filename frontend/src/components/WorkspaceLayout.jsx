@@ -32,28 +32,28 @@ export default function WorkspaceLayout({ pdfFile = null, className = "", patent
 
   return (
     <main
-      className={`grid h-screen min-h-0 grid-cols-12 grid-rows-2 gap-4 overflow-hidden bg-slate-50 p-4 lg:grid-rows-1 ${className}`}
+      className={`grid h-screen min-h-0 grid-cols-12 grid-rows-2 gap-4 overflow-hidden bg-gradient-to-br from-slate-100 via-slate-50 to-indigo-50/40 p-3 sm:p-4 lg:grid-rows-1 ${className}`}
       aria-label="PatentShield analysis workspace"
     >
       <section className="col-span-12 flex min-h-0 flex-col lg:col-span-7" aria-label="Source document">
         <PDFViewer file={pdfFile} className="flex-1" />
       </section>
 
-      <section className="col-span-12 flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white lg:col-span-5">
-        <header className="shrink-0 border-b border-slate-200 bg-white p-4">
+      <section className="col-span-12 flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-panel lg:col-span-5">
+        <header className="shrink-0 border-b border-slate-200/80 bg-gradient-to-br from-white to-slate-50 p-4 sm:p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-600">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-600">
                 Screening overview
               </p>
-              <h1 className="mt-1 text-lg font-semibold text-slate-900">
+              <h1 className="mt-1 text-lg font-bold tracking-tight text-slate-950">
                 Patent evidence review
               </h1>
               <p className="mt-1 max-w-md text-xs leading-5 text-slate-500">
                 Use verified source passages to review each technical limitation. This score prioritizes review; it is not a legal conclusion.
               </p>
             </div>
-            <div className="min-w-24 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-right">
+            <div className="min-w-24 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-right shadow-sm">
               <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                 Priority score
               </span>
@@ -64,9 +64,9 @@ export default function WorkspaceLayout({ pdfFile = null, className = "", patent
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-2">
+          <div className="mt-4 grid grid-cols-2 gap-2.5">
             {METRIC_LABELS.map(([key, label]) => (
-              <div key={key} className="rounded-lg bg-slate-50 px-3 py-2">
+              <div key={key} className="rounded-xl border border-slate-200/70 bg-white px-3 py-2.5">
                 <span className="block text-[11px] text-slate-500">{label}</span>
                 <span className="mt-0.5 block text-sm font-semibold tabular-nums text-slate-800">
                   {formatMetric(screeningMetrics?.[key])}

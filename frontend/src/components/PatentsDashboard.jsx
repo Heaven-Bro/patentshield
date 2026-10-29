@@ -80,10 +80,10 @@ export default function PatentsDashboard({
   }
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
+    <main className="ps-page">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-700">Patent library</p>
+          <p className="ps-eyebrow">Patent library</p>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
             {tenant ? `${tenant.name} workspace` : "Your workspaces"}
           </h1>
@@ -129,7 +129,7 @@ export default function PatentsDashboard({
       )}
 
       {tenant && !canUpload && (
-        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+        <section className="mt-6 ps-metric-card">
           <h2 className="text-sm font-semibold text-slate-800">Document ingestion</h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
             Your current role can review authorized documents, but cannot upload or reprocess patent PDFs.
@@ -183,7 +183,7 @@ export default function PatentsDashboard({
               const status = patent.status || "UPLOADED";
               const versionStatus = latestVersion?.extraction_status || "PENDING";
               return (
-                <article key={patent.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <article key={patent.id} className="ps-panel transition hover:border-slate-300 hover:shadow-md">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-400">

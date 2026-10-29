@@ -33,7 +33,7 @@ docker compose exec -T api python manage.py makemigrations --check --dry-run
 printf '\n[6/10] Django app regression suites\n'
 docker compose exec -T api python manage.py test \
   accounts tenants audit patents ingestion indexing retrieval ai_engine analyses reports \
-  office_actions multilingual_search fto landscapes enterprise_identity \
+  office_actions multilingual_search fto landscapes enterprise_identity portfolio_valuation \
   --verbosity 1
 
 printf '\n[7/10] Tenant isolation, release integration, retry, and SLA tests\n'
@@ -61,4 +61,4 @@ printf '\n[10/10] Offline model-bundle utility tests\n'
   python -m unittest deployment.test_model_bundle deployment.test_pg_service
 )
 
-printf '\nPatentShield release gate passed. Review phase-specific manual checks under docs/PHASE_3 through docs/PHASE_9.\n'
+printf '\nPatentShield release gate passed. Review phase-specific manual checks under docs/PHASE_3 through docs/PHASE_10.\n'

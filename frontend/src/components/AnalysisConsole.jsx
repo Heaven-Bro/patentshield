@@ -508,11 +508,11 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
   if (!tenantId) return null;
 
   return (
-    <section className="mx-auto w-full max-w-[1800px] px-4 pb-10 pt-3 sm:px-6 lg:px-8" aria-label="Analysis execution and reports">
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+    <section className="ps-page !space-y-4 !py-3" aria-label="Analysis execution and reports">
+      <div className="ps-panel sm:p-6">
         <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-indigo-700">Prior-art analysis</p>
+            <p className="ps-eyebrow">Prior-art analysis</p>
             <h2 className="mt-1 text-xl font-semibold tracking-tight text-slate-950">Run and monitor an analysis</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
               Choose an indexed patent claim to start a tenant-isolated analysis. Results and report downloads are available only to active members of this workspace.
@@ -570,7 +570,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(280px,0.75fr)]">
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm" aria-label="Analysis history">
+        <section className="ps-panel" aria-label="Analysis history">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold text-slate-900">Recent analyses</h3>
             <span className="text-xs text-slate-500">{history.length} shown</span>
@@ -593,7 +593,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
           )}
         </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm" aria-label="Analysis and report status">
+        <section className="ps-panel" aria-label="Analysis and report status">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">Execution status</h3>

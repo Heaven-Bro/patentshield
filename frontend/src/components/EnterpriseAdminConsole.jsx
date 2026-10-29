@@ -17,22 +17,22 @@ const emptyProvider = () => ({
 
 function ErrorBanner({ value }) {
   if (!value) return null;
-  return <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{value}</div>;
+  return <div role="alert" className="ps-alert-error">{value}</div>;
 }
 
 function Section({ title, description, children }) {
-  return <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-    <div className="mb-4"><h2 className="text-base font-bold text-slate-950">{title}</h2>{description && <p className="mt-1 text-sm leading-5 text-slate-500">{description}</p>}</div>
+  return <section className="ps-panel">
+    <div className="mb-4"><h2 className="ps-panel-title">{title}</h2>{description && <p className="ps-panel-description">{description}</p>}</div>
     {children}
   </section>;
 }
 
 function Field({ label, value, onChange, placeholder = "", type = "text", required = false }) {
-  return <label className="block text-sm"><span className="mb-1 block font-medium text-slate-700">{label}</span><input type={type} value={value ?? ""} required={required} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" /></label>;
+  return <label className="block text-sm"><span className="mb-1 block font-medium text-slate-700">{label}</span><input type={type} value={value ?? ""} required={required} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="ps-input" /></label>;
 }
 
 function SelectField({ label, value, onChange, options }) {
-  return <label className="block text-sm"><span className="mb-1 block font-medium text-slate-700">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">{options.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>;
+  return <label className="block text-sm"><span className="mb-1 block font-medium text-slate-700">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="ps-input">{options.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>;
 }
 
 function CheckField({ label, checked, onChange }) {
@@ -40,8 +40,8 @@ function CheckField({ label, checked, onChange }) {
 }
 
 function Button({ children, disabled = false, onClick, variant = "primary", type = "button" }) {
-  const look = variant === "danger" ? "border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100" : variant === "secondary" ? "border-slate-300 bg-white text-slate-700 hover:bg-slate-50" : "border-transparent bg-indigo-700 text-white hover:bg-indigo-800";
-  return <button type={type} disabled={disabled} onClick={onClick} className={`rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${look}`}>{children}</button>;
+  const look = variant === "danger" ? "border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100" : variant === "secondary" ? "border-slate-200 bg-white text-slate-700 hover:border-indigo-200 hover:bg-indigo-50/60 hover:text-indigo-800" : "border-transparent bg-indigo-600 text-white shadow-indigo-700/15 hover:bg-indigo-700";
+  return <button type={type} disabled={disabled} onClick={onClick} className={`inline-flex items-center justify-center rounded-xl border px-3.5 py-2.5 text-xs font-bold shadow-sm transition duration-150 hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-45 ${look}`}>{children}</button>;
 }
 
 export default function EnterpriseAdminConsole({ tenant, user }) {
@@ -200,8 +200,8 @@ export default function EnterpriseAdminConsole({ tenant, user }) {
 
   const scimUrl = `${window.location.origin}${ROOT}/scim/v2/${tenant?.slug}/Users/`;
 
-  return <main className="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
-    <div className="rounded-2xl bg-slate-950 p-6 text-white shadow-sm sm:p-8">
+  return <main className="ps-page">
+    <div className="ps-hero">
       <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-300">Identity & Governance</p>
       <div className="mt-2 flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><h1 className="text-2xl font-bold tracking-tight">Enterprise administration</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">Configure SSO providers, issue scoped directory tokens, protect confidential matters, revoke sessions, and export audit history for {tenant?.name}.</p></div><Button onClick={() => void refresh()} disabled={busy} variant="secondary">{busy ? "Refreshing…" : "Refresh data"}</Button></div>
     </div>
@@ -212,7 +212,7 @@ export default function EnterpriseAdminConsole({ tenant, user }) {
       <form onSubmit={saveProvider} className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold text-slate-900">{editingProvider ? "Edit provider" : "Add identity provider"}</h3>{editingProvider && <Button variant="secondary" onClick={resetProviderForm}>Cancel edit</Button>}</div>
         <div className="grid gap-3 md:grid-cols-3"><Field label="Slug" value={providerForm.slug} onChange={(v) => setProviderField("slug", v)} required placeholder="company-sso" /><Field label="Display name" value={providerForm.name} onChange={(v) => setProviderField("name", v)} required placeholder="Company SSO" /><SelectField label="Protocol" value={providerForm.protocol} onChange={(v) => setProviderField("protocol", v)} options={["OIDC", "SAML"]} /></div>
-        {providerForm.protocol === "OIDC" ? <div className="grid gap-3 md:grid-cols-2"><Field label="Issuer URL" value={providerForm.issuer} onChange={(v) => setProviderField("issuer", v)} required placeholder="https://idp.example.com" /><Field label="Discovery URL" value={providerForm.discovery_url} onChange={(v) => setProviderField("discovery_url", v)} required placeholder="https://idp.example.com/.well-known/openid-configuration" /><Field label="Client ID" value={providerForm.client_id} onChange={(v) => setProviderField("client_id", v)} required /><Field label="Client secret (write-only)" value={providerForm.client_secret} onChange={(v) => setProviderField("client_secret", v)} type="password" placeholder={editingProvider ? "Leave blank to keep saved secret" : "Required before enabling OIDC"} /><SelectField label="Token endpoint auth" value={providerForm.client_auth_method} onChange={(v) => setProviderField("client_auth_method", v)} options={["client_secret_basic", "client_secret_post"]} /></div> : <div className="grid gap-3 md:grid-cols-2"><Field label="IdP entity ID" value={providerForm.idp_entity_id} onChange={(v) => setProviderField("idp_entity_id", v)} required /><Field label="SSO URL" value={providerForm.sso_url} onChange={(v) => setProviderField("sso_url", v)} required placeholder="https://idp.example.com/sso" /><Field label="SP entity ID (optional)" value={providerForm.sp_entity_id} onChange={(v) => setProviderField("sp_entity_id", v)} /><label className="block text-sm md:col-span-2"><span className="mb-1 block font-medium text-slate-700">IdP X.509 certificate (PEM or base64 body)</span><textarea value={providerForm.idp_x509_certificate} onChange={(event) => setProviderField("idp_x509_certificate", event.target.value)} rows={4} required className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs" /></label><Field label="Email attribute" value={providerForm.saml_email_attribute} onChange={(v) => setProviderField("saml_email_attribute", v)} /><Field label="Groups attribute" value={providerForm.saml_groups_attribute} onChange={(v) => setProviderField("saml_groups_attribute", v)} /></div>}
+        {providerForm.protocol === "OIDC" ? <div className="grid gap-3 md:grid-cols-2"><Field label="Issuer URL" value={providerForm.issuer} onChange={(v) => setProviderField("issuer", v)} required placeholder="https://idp.example.com" /><Field label="Discovery URL" value={providerForm.discovery_url} onChange={(v) => setProviderField("discovery_url", v)} required placeholder="https://idp.example.com/.well-known/openid-configuration" /><Field label="Client ID" value={providerForm.client_id} onChange={(v) => setProviderField("client_id", v)} required /><Field label="Client secret (write-only)" value={providerForm.client_secret} onChange={(v) => setProviderField("client_secret", v)} type="password" placeholder={editingProvider ? "Leave blank to keep saved secret" : "Required before enabling OIDC"} /><SelectField label="Token endpoint auth" value={providerForm.client_auth_method} onChange={(v) => setProviderField("client_auth_method", v)} options={["client_secret_basic", "client_secret_post"]} /></div> : <div className="grid gap-3 md:grid-cols-2"><Field label="IdP entity ID" value={providerForm.idp_entity_id} onChange={(v) => setProviderField("idp_entity_id", v)} required /><Field label="SSO URL" value={providerForm.sso_url} onChange={(v) => setProviderField("sso_url", v)} required placeholder="https://idp.example.com/sso" /><Field label="SP entity ID (optional)" value={providerForm.sp_entity_id} onChange={(v) => setProviderField("sp_entity_id", v)} /><label className="block text-sm md:col-span-2"><span className="mb-1 block font-medium text-slate-700">IdP X.509 certificate (PEM or base64 body)</span><textarea value={providerForm.idp_x509_certificate} onChange={(event) => setProviderField("idp_x509_certificate", event.target.value)} rows={4} required className="ps-input font-mono text-xs" /></label><Field label="Email attribute" value={providerForm.saml_email_attribute} onChange={(v) => setProviderField("saml_email_attribute", v)} /><Field label="Groups attribute" value={providerForm.saml_groups_attribute} onChange={(v) => setProviderField("saml_groups_attribute", v)} /></div>}
         <div className="grid gap-3 md:grid-cols-2"><Field label="Allowed email domains (comma-separated; blank = no domain allowlist)" value={Array.isArray(providerForm.allowed_email_domains) ? providerForm.allowed_email_domains.join(", ") : providerForm.allowed_email_domains} onChange={(v) => setProviderField("allowed_email_domains", v)} placeholder="example.com, subsidiary.example.com" /><SelectField label="Default tenant role" value={providerForm.default_role} onChange={(v) => setProviderField("default_role", v)} options={ROLES.filter((role) => role !== "OWNER")} /></div>
         <div className="flex flex-wrap gap-x-5 gap-y-2"><CheckField label="Enable provider (only after configuration is verified)" checked={providerForm.enabled} onChange={(v) => setProviderField("enabled", v)} /><CheckField label="Allow just-in-time provisioning" checked={providerForm.jit_provisioning} onChange={(v) => setProviderField("jit_provisioning", v)} /><CheckField label="Trust verified IdP email" checked={providerForm.trust_email_from_idp} onChange={(v) => setProviderField("trust_email_from_idp", v)} /><CheckField label="Allow explicitly configured existing-email link" checked={providerForm.allow_existing_email_link} onChange={(v) => setProviderField("allow_existing_email_link", v)} /></div>
         <div className="flex flex-wrap items-center gap-3"><Button type="submit" disabled={busy}>{editingProvider ? "Save provider" : "Create provider"}</Button><p className="text-xs text-slate-500">OIDC callback: <code className="break-all">/api/v1/enterprise-auth/oidc/callback/</code></p></div>
