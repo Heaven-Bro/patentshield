@@ -5,10 +5,12 @@ import hashlib
 import hmac
 import io
 import logging
+from datetime import timedelta
 
 from celery import Task, shared_task
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.utils import timezone
 
 from audit.models import AuditLog
 from office_actions.models import OfficeAction
@@ -21,8 +23,24 @@ class PermanentOfficeActionProcessingError(Exception):
     """An invalid document or configuration issue that retry cannot fix."""
 
 
+class PDFResourceLimitError(PermanentOfficeActionProcessingError):
+    """The supplied PDF exceeds page or extracted-text limits."""
+
+
+MAX_PDF_PAGES = 2_000
+MAX_EXTRACTED_CHARACTERS = 25_000_000
+PROCESSING_LEASE = timedelta(minutes=45)
+
+
+def _check_page_count(page_count: int) -> None:
+    if page_count > MAX_PDF_PAGES:
+        raise PDFResourceLimitError(
+            f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
+        )
+
+
 def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
-    """Extract per-page text, preferring pypdf and falling back to PyMuPDF."""
+    """Extract text with page and total-character limits before accumulation."""
     errors: list[Exception] = []
     try:
         from pypdf import PdfReader
@@ -31,10 +49,22 @@ def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
     else:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-            pages = [(page.extract_text() or "") for page in reader.pages]
+            _check_page_count(len(reader.pages))
+            pages: list[str] = []
+            total_characters = 0
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                total_characters += len(text) + (1 if pages else 0)
+                if total_characters > MAX_EXTRACTED_CHARACTERS:
+                    raise PDFResourceLimitError(
+                        "PDF text exceeds the 25-million-character extraction limit."
+                    )
+                pages.append(text)
             if any(page.strip() for page in pages):
                 return pages
             errors.append(ValueError("No readable text was extracted by pypdf."))
+        except PDFResourceLimitError:
+            raise
         except Exception as exc:
             errors.append(exc)
     try:
@@ -44,10 +74,22 @@ def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
     else:
         try:
             with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-                pages = [(page.get_text("text") or "") for page in document]
+                _check_page_count(document.page_count)
+                pages: list[str] = []
+                total_characters = 0
+                for page in document:
+                    text = page.get_text("text") or ""
+                    total_characters += len(text) + (1 if pages else 0)
+                    if total_characters > MAX_EXTRACTED_CHARACTERS:
+                        raise PDFResourceLimitError(
+                            "PDF text exceeds the 25-million-character extraction limit."
+                        )
+                    pages.append(text)
             if any(page.strip() for page in pages):
                 return pages
             errors.append(ValueError("No readable text was extracted by PyMuPDF."))
+        except PDFResourceLimitError:
+            raise
         except Exception as exc:
             errors.append(exc)
     if errors and all(isinstance(error, ImportError) for error in errors):
@@ -57,22 +99,35 @@ def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
 
 @shared_task(bind=True, max_retries=3, acks_late=True)
 def process_office_action(self: Task, office_action_id: str) -> dict[str, object]:
-    """Extract text, classify likely grounds, and map reference identifiers.
-
-    Job payloads contain only the office-action UUID. Tenant, parent matter and
-    document integrity are revalidated from the database at execution time.
-    """
+    """Extract, classify, and map citations with row-lock single-flight semantics."""
     action = None
     try:
-        action = OfficeAction.objects.select_related("patent", "created_by").get(pk=office_action_id)
-        if action.patent.tenant_id != action.tenant_id:
-            raise PermanentOfficeActionProcessingError("Office action and patent tenant boundaries do not match.")
-        if action.extraction_status == OfficeAction.ExtractionStatus.EXTRACTED and action.parse_status in {OfficeAction.ParseStatus.COMPLETED, OfficeAction.ParseStatus.NEEDS_REVIEW}:
-            return {"office_action_id": str(action.pk), "status": action.extraction_status, "idempotent": True}
-        OfficeAction.objects.filter(pk=action.pk, tenant_id=action.tenant_id).update(
-            extraction_status=OfficeAction.ExtractionStatus.PROCESSING,
-            extraction_error_code="",
-        )
+        with transaction.atomic():
+            action = (
+                OfficeAction.objects.select_for_update()
+                .select_related("patent", "created_by")
+                .get(pk=office_action_id)
+            )
+            if (
+                action.extraction_status == OfficeAction.ExtractionStatus.EXTRACTED
+                and action.parse_status in {
+                    OfficeAction.ParseStatus.COMPLETED,
+                    OfficeAction.ParseStatus.NEEDS_REVIEW,
+                }
+            ):
+                return {"office_action_id": str(action.pk), "status": action.extraction_status, "idempotent": True}
+            now = timezone.now()
+            if (
+                action.extraction_status == OfficeAction.ExtractionStatus.PROCESSING
+                and action.updated_at > now - PROCESSING_LEASE
+            ):
+                return {"office_action_id": str(action.pk), "status": action.extraction_status, "already_processing": True}
+            if action.patent.tenant_id != action.tenant_id:
+                raise PermanentOfficeActionProcessingError("Office action and patent tenant boundaries do not match.")
+            action.extraction_status = OfficeAction.ExtractionStatus.PROCESSING
+            action.extraction_error_code = ""
+            action.save(update_fields=("extraction_status", "extraction_error_code", "updated_at"))
+
         try:
             with default_storage.open(action.storage_key, "rb") as source:
                 pdf_bytes = source.read()
@@ -85,21 +140,30 @@ def process_office_action(self: Task, office_action_id: str) -> dict[str, object
             raise PermanentOfficeActionProcessingError("Stored office-action PDF failed its SHA-256 integrity check.")
         try:
             pages = _extract_pdf_pages(pdf_bytes)
+        except PDFResourceLimitError:
+            raise
         except RuntimeError as exc:
             raise PermanentOfficeActionProcessingError(str(exc)) from exc
         if not pages or not any(page.strip() for page in pages):
             raise PermanentOfficeActionProcessingError("The office-action document has no extractable text; OCR is not configured.")
         joined = "\n".join(pages)
+        if len(joined) > MAX_EXTRACTED_CHARACTERS:
+            raise PDFResourceLimitError("PDF text exceeds the 25-million-character extraction limit.")
         with transaction.atomic():
             locked = OfficeAction.objects.select_for_update().get(pk=action.pk, tenant_id=action.tenant_id)
-            # Keep extraction idempotent and preserve generated draft evidence.
+            # Keep PROCESSING set through parsing; duplicate Celery deliveries see
+            # the active lease and return without repeating expensive extraction.
             locked.extracted_pages = pages
             locked.extracted_text = joined
             locked.page_count = len(pages)
+            locked.extraction_error_code = ""
+            locked.save(update_fields=("extracted_pages", "extracted_text", "page_count", "extraction_error_code", "updated_at"))
+        counts = parse_office_action(locked)
+        with transaction.atomic():
+            locked = OfficeAction.objects.select_for_update().get(pk=action.pk, tenant_id=action.tenant_id)
             locked.extraction_status = OfficeAction.ExtractionStatus.EXTRACTED
             locked.extraction_error_code = ""
-            locked.save(update_fields=("extracted_pages", "extracted_text", "page_count", "extraction_status", "extraction_error_code", "updated_at"))
-        counts = parse_office_action(locked)
+            locked.save(update_fields=("extraction_status", "extraction_error_code", "updated_at"))
         AuditLog.objects.create(
             tenant_id=action.tenant_id,
             actor_user_id=action.created_by.pk,
@@ -115,10 +179,11 @@ def process_office_action(self: Task, office_action_id: str) -> dict[str, object
         is_permanent = isinstance(exc, PermanentOfficeActionProcessingError) or action is None or isinstance(exc, OfficeAction.DoesNotExist)
         will_retry = not is_permanent and retries < self.max_retries
         if action is not None:
-            code = "INTEGRITY_CHECK_FAILED" if "SHA-256" in str(exc) else "PDF_EXTRACTION_FAILED"
+            code = "RESOURCE_LIMIT_EXCEEDED" if isinstance(exc, PDFResourceLimitError) else ("INTEGRITY_CHECK_FAILED" if "SHA-256" in str(exc) else "PDF_EXTRACTION_FAILED")
             OfficeAction.objects.filter(pk=action.pk, tenant_id=action.tenant_id).update(
                 extraction_status=(OfficeAction.ExtractionStatus.RETRYING if will_retry else OfficeAction.ExtractionStatus.FAILED),
                 extraction_error_code=code,
+                updated_at=timezone.now(),
             )
             try:
                 AuditLog.objects.create(

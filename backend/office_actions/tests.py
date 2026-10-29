@@ -138,3 +138,12 @@ class OfficeActionWorkflowTests(TestCase):
         revision.content_markdown = "Modified in place"
         with self.assertRaises(ValidationError):
             revision.save()
+
+
+class OfficeActionPDFResourceLimitTests(SimpleTestCase):
+    def test_page_limit_fails_before_pdf_page_iteration(self):
+        from unittest.mock import patch
+        from office_actions.tasks import PDFResourceLimitError, _check_page_count
+
+        with patch("office_actions.tasks.MAX_PDF_PAGES", 2), self.assertRaises(PDFResourceLimitError):
+            _check_page_count(3)
