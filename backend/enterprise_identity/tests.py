@@ -18,6 +18,7 @@ from enterprise_identity.models import (
     MatterGrant,
     MatterPolicy,
     SCIMToken,
+    SCIMUserBinding,
 )
 from enterprise_identity.services import (
     _https_url,
@@ -57,6 +58,13 @@ class EnterpriseUrlSafetyTests(SimpleTestCase):
         self.assertFalse(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
         getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
         self.assertTrue(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
+
+    @override_settings(PATENTSHIELD_IDP_ALLOWED_HOSTS="")
+    @patch("enterprise_identity.services.socket.getaddrinfo")
+    def test_oidc_endpoint_allowlist_must_not_be_empty(self, getaddrinfo):
+        getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
+        self.assertFalse(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
+        getaddrinfo.assert_not_called()
 
     def test_csv_formula_prefixes_are_neutralized(self):
         from enterprise_identity.views import _safe_csv_cell
@@ -173,6 +181,24 @@ class EnterpriseIdentitySecurityTests(TestCase):
         self.member.refresh_from_db()
         self.assertFalse(self.member.is_active)
         self.assertEqual(TenantMembership.objects.get(tenant=self.tenant, user=self.member).status, TenantMembership.Status.ACTIVE)
+
+    def test_scim_reactivation_restores_only_an_account_disabled_by_scim(self):
+        token = SCIMToken.objects.create(
+            tenant=self.tenant, label="directory", token_hash=hashlib.sha256(b"private-token-scim-toggle").hexdigest(),
+            scopes=["Users:write"], created_by=self.user,
+        )
+        binding = SCIMUserBinding.objects.create(tenant=self.tenant, external_id="analyst-01", user=self.member)
+        membership_for_scim(token=token, user=self.member, active=False)
+        self.member.refresh_from_db()
+        binding.refresh_from_db()
+        self.assertFalse(self.member.is_active)
+        self.assertTrue(binding.globally_disabled_by_scim)
+
+        membership_for_scim(token=token, user=self.member, active=True)
+        self.member.refresh_from_db()
+        binding.refresh_from_db()
+        self.assertTrue(self.member.is_active)
+        self.assertFalse(binding.globally_disabled_by_scim)
 
     def test_session_registry_stores_only_hmac_digest(self):
         raw_key = "sample-django-session-key-not-to-persist"

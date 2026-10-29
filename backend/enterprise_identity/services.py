@@ -48,22 +48,22 @@ class EnterpriseAuthError(Exception):
 
 
 def audit_identity(*, tenant: Tenant, actor, action: str, resource_type: str, resource_id=None, metadata=None, outcome=AuditLog.Outcome.SUCCESS) -> None:
-    """Persist an enterprise identity event without credentials or claims dumps."""
-    try:
+    """Persist a security audit event; failures must abort the surrounding change.
+
+    Callers that mutate identity, grant, or credential state wrap both the mutation
+    and this write in one ``transaction.atomic()`` block. Never swallow audit
+    persistence exceptions for security-sensitive state transitions.
+    """
+    with transaction.atomic():
         AuditLog.objects.create(
             tenant=tenant,
-            actor_user_id=actor.id if getattr(actor, "is_authenticated", False) else None,
+            actor_user_id=actor.pk if getattr(actor, "is_authenticated", False) else None,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,
             outcome=outcome,
             metadata=metadata or {},
         )
-    except Exception:
-        # Security event writes should be visible in app logs but must not leak
-        # user payloads or cause an authentication response to expose internals.
-        import logging
-        logging.getLogger(__name__).exception("Enterprise identity audit persistence failed.")
 
 
 def _fernet() -> Fernet:
@@ -118,7 +118,8 @@ def _safe_external_endpoint(url: str, *, allow_localhost: bool = False) -> bool:
         for item in str(getattr(settings, "PATENTSHIELD_IDP_ALLOWED_HOSTS", "") or "").split(",")
         if item.strip()
     }
-    if allowed_hosts and host not in allowed_hosts:
+    # Fail closed: an empty allowlist must never silently mean "any public host".
+    if not allowed_hosts or host not in allowed_hosts:
         return False
     try:
         answers = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
@@ -495,6 +496,7 @@ _MATTER_MODEL_PATHS = {
     "fto_study": ("fto.models", "FTOStudy"),
     "product_matter": ("fto.models", "ProductMatter"),
     "landscape_study": ("landscapes.models", "LandscapeStudy"),
+    "portfolio_valuation": ("portfolio_valuation.models", "PortfolioValuationStudy"),
 }
 
 
@@ -576,19 +578,70 @@ def require_matter_access(*, request, matter_type: str, matter_id, required: str
 
 
 def membership_for_scim(*, token: SCIMToken, user, active: bool, role: str | None = None) -> None:
-    """Activate/revoke only this tenant membership; never disable unrelated tenants."""
-    membership, created = TenantMembership.objects.get_or_create(
-        tenant=token.tenant, user=user,
-        defaults={"role": role or TenantMembership.Role.READ_ONLY, "status": TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED},
-    )
-    if not created:
-        if role in TenantMembership.Role.values:
-            membership.role = role
-        membership.status = TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED
-        membership.save(update_fields=("role", "status"))
-    if not active:
-        has_other_active = TenantMembership.objects.filter(user=user, status=TenantMembership.Status.ACTIVE, tenant__status=Tenant.Status.ACTIVE).exclude(tenant=token.tenant).exists()
-        if not has_other_active:
-            user.is_active = False
-            user.save(update_fields=("is_active",))
-            revoke_all_django_sessions_for_user(user, actor=token.created_by)
+    """Update one tenant membership and safely track SCIM-caused global disablement.
+
+    A globally disabled account is reactivated only when this SCIM binding was
+    the reason it was disabled. All membership/user/session changes and their
+    security audit record are part of one database transaction.
+    """
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().get(pk=user.pk)
+        membership, created = TenantMembership.objects.select_for_update().get_or_create(
+            tenant=token.tenant,
+            user=locked_user,
+            defaults={
+                "role": role or TenantMembership.Role.READ_ONLY,
+                "status": TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED,
+            },
+        )
+        if not created:
+            if role in TenantMembership.Role.values:
+                membership.role = role
+            membership.status = TenantMembership.Status.ACTIVE if active else TenantMembership.Status.REVOKED
+            membership.save(update_fields=("role", "status"))
+
+        binding = (
+            SCIMUserBinding.objects.select_for_update()
+            .filter(tenant=token.tenant, user=locked_user)
+            .first()
+        )
+        global_state_changed = False
+        if not active:
+            has_other_active = TenantMembership.objects.filter(
+                user=locked_user,
+                status=TenantMembership.Status.ACTIVE,
+                tenant__status=Tenant.Status.ACTIVE,
+            ).exclude(tenant=token.tenant).exists()
+            if not has_other_active and locked_user.is_active:
+                locked_user.is_active = False
+                locked_user.save(update_fields=("is_active",))
+                global_state_changed = True
+                if binding is not None:
+                    binding.globally_disabled_by_scim = True
+                    binding.save(update_fields=("globally_disabled_by_scim", "updated_at"))
+                revoke_all_django_sessions_for_user(locked_user, actor=token.created_by)
+        elif binding is not None and binding.globally_disabled_by_scim:
+            # The SCIM integration itself disabled this account. Restore it only
+            # while the marker is present, then clear the marker transactionally.
+            if not locked_user.is_active:
+                locked_user.is_active = True
+                locked_user.save(update_fields=("is_active",))
+                global_state_changed = True
+            binding.globally_disabled_by_scim = False
+            binding.save(update_fields=("globally_disabled_by_scim", "updated_at"))
+
+        user.is_active = locked_user.is_active
+        audit_identity(
+            tenant=token.tenant,
+            actor=token.created_by,
+            action="SCIM_MEMBERSHIP_ACTIVATED" if active else "SCIM_MEMBERSHIP_REVOKED",
+            resource_type="TenantMembership",
+            resource_id=membership.pk,
+            metadata={
+                "target_user_id": str(locked_user.pk),
+                "membership_created": created,
+                "active": active,
+                "global_state_changed": global_state_changed,
+                "scim_external_id": binding.external_id if binding else None,
+            },
+        )

@@ -92,6 +92,7 @@ class IdentityProviderListCreateView(EnterpriseAdminAPIView):
         rows = IdentityProvider.objects.for_tenant(tenant.pk).order_by("name")
         return Response({"results": IdentityProviderSerializer(rows, many=True).data})
 
+    @transaction.atomic
     def post(self, request: Request) -> Response:
         tenant = self.tenant(request)
         serializer = IdentityProviderSerializer(data=request.data)
@@ -108,6 +109,7 @@ class IdentityProviderDetailView(EnterpriseAdminAPIView):
     def get(self, request: Request, provider_id) -> Response:
         return Response(IdentityProviderSerializer(self.get_provider(request, provider_id)).data)
 
+    @transaction.atomic
     def patch(self, request: Request, provider_id) -> Response:
         tenant = self.tenant(request)
         provider = self.get_provider(request, provider_id)
@@ -117,6 +119,7 @@ class IdentityProviderDetailView(EnterpriseAdminAPIView):
         audit_identity(tenant=tenant, actor=request.user, action="IDENTITY_PROVIDER_UPDATED", resource_type="IdentityProvider", resource_id=provider.pk, metadata={"fields": sorted(serializer.validated_data.keys())})
         return Response(IdentityProviderSerializer(provider).data)
 
+    @transaction.atomic
     def delete(self, request: Request, provider_id) -> Response:
         tenant = self.tenant(request)
         provider = self.get_provider(request, provider_id)
@@ -225,6 +228,7 @@ class SCIMTokenListCreateView(EnterpriseAdminAPIView):
         rows = SCIMToken.objects.for_tenant(self.tenant(request).pk).order_by("-created_at")
         return Response({"results": SCIMTokenSerializer(rows, many=True).data})
 
+    @transaction.atomic
     def post(self, request: Request) -> Response:
         tenant = self.tenant(request)
         label = str(request.data.get("label", "")).strip()[:120]
@@ -252,6 +256,7 @@ class SCIMTokenListCreateView(EnterpriseAdminAPIView):
 
 
 class SCIMTokenRevokeView(EnterpriseAdminAPIView):
+    @transaction.atomic
     def post(self, request: Request, token_id) -> Response:
         tenant = self.tenant(request)
         token = get_object_or_404(SCIMToken.objects.for_tenant(tenant.pk), pk=token_id)
@@ -270,6 +275,7 @@ class MatterPolicyListCreateView(EnterpriseAdminAPIView):
             rows = rows.filter(matter_type=matter_type)
         return Response({"results": MatterPolicySerializer(rows.order_by("matter_type", "matter_id")[:500], many=True).data})
 
+    @transaction.atomic
     def post(self, request: Request) -> Response:
         tenant = self.tenant(request)
         serializer = MatterPolicySerializer(data=request.data)
@@ -289,6 +295,7 @@ class MatterPolicyListCreateView(EnterpriseAdminAPIView):
 
 
 class MatterPolicyDetailView(EnterpriseAdminAPIView):
+    @transaction.atomic
     def patch(self, request: Request, policy_id) -> Response:
         tenant = self.tenant(request)
         policy = get_object_or_404(MatterPolicy.objects.for_tenant(tenant.pk), pk=policy_id)
@@ -315,6 +322,7 @@ class MatterGrantListCreateView(EnterpriseAdminAPIView):
             rows = rows.filter(matter_id=request.query_params["matter_id"])
         return Response({"results": MatterGrantSerializer(rows[:1000], many=True).data})
 
+    @transaction.atomic
     def post(self, request: Request) -> Response:
         tenant = self.tenant(request)
         serializer = MatterGrantSerializer(data=request.data)
@@ -330,6 +338,7 @@ class MatterGrantListCreateView(EnterpriseAdminAPIView):
 
 
 class MatterGrantDeleteView(EnterpriseAdminAPIView):
+    @transaction.atomic
     def delete(self, request: Request, grant_id) -> Response:
         tenant = self.tenant(request)
         grant = get_object_or_404(MatterGrant.objects.for_tenant(tenant.pk), pk=grant_id)
@@ -429,6 +438,7 @@ class ManagedSessionListView(EnterpriseAdminAPIView):
 
 
 class ManagedSessionRevokeView(EnterpriseAdminAPIView):
+    @transaction.atomic
     def post(self, request: Request, session_id) -> Response:
         tenant = self.tenant(request)
         record = get_object_or_404(ManagedSession.objects.filter(user__tenant_memberships__tenant=tenant, user__tenant_memberships__status=TenantMembership.Status.ACTIVE).distinct(), pk=session_id)
@@ -438,6 +448,7 @@ class ManagedSessionRevokeView(EnterpriseAdminAPIView):
 
 
 class UserSessionsRevokeAllView(EnterpriseAdminAPIView):
+    @transaction.atomic
     def post(self, request: Request, user_id) -> Response:
         tenant = self.tenant(request)
         target = get_object_or_404(User.objects.filter(tenant_memberships__tenant=tenant, tenant_memberships__status=TenantMembership.Status.ACTIVE).distinct(), pk=user_id)
@@ -578,7 +589,7 @@ def _apply_scim_user_values(*, request, token: SCIMToken, binding: SCIMUserBindi
         from enterprise_identity.services import membership_for_scim
         binding.save(update_fields=("external_id", "updated_at"))
         membership_for_scim(token=token, user=user, active=active, role=role)
-    audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_UPDATED" if not create else "SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": binding.external_id})
+        audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_UPDATED" if not create else "SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": binding.external_id})
     return binding
 
 
@@ -611,6 +622,7 @@ class SCIMUsersView(APIView):
         resources = [_scim_resource(request._request, token, binding) for binding in selected]
         return Response({"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": total, "startIndex": start_index, "itemsPerPage": len(resources), "Resources": resources}, content_type="application/scim+json")
 
+    @transaction.atomic
     def post(self, request: Request, tenant_slug: str) -> Response:
         token = request.auth
         data = request.data
@@ -646,15 +658,18 @@ class SCIMUsersView(APIView):
             return _scim_error("active must be a boolean.", "invalidValue", 400)
         try:
             with transaction.atomic():
-                user = User(username=username, email=email, first_name=given_name[:150], last_name=family_name[:150], is_active=active)
+                # Start active only inside this transaction so membership_for_scim
+                # can mark a SCIM-requested inactive account as SCIM-disabled. The
+                # account state is not visible until the atomic block commits.
+                user = User(username=username, email=email, first_name=given_name[:150], last_name=family_name[:150], is_active=True)
                 user.set_unusable_password()
                 user.save()
                 binding = SCIMUserBinding.objects.create(tenant=token.tenant, external_id=external_id, user=user)
                 from enterprise_identity.services import membership_for_scim
                 membership_for_scim(token=token, user=user, active=active, role=TenantMembership.Role.READ_ONLY)
+                audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": external_id})
         except IntegrityError:
             return _scim_error("A user with this identity already exists.", "uniqueness", 409)
-        audit_identity(tenant=token.tenant, actor=token.created_by, action="SCIM_USER_CREATED", resource_type="User", metadata={"target_user_id": str(user.pk), "active": active, "scim_external_id": external_id})
         return Response(_scim_resource(request._request, token, binding), status=201, content_type="application/scim+json", headers={"Location": request.build_absolute_uri(f"/api/v1/enterprise-auth/scim/v2/{tenant_slug}/Users/{user.pk}/")})
 
 
@@ -670,6 +685,7 @@ class SCIMUserDetailView(APIView):
     def get(self, request: Request, tenant_slug: str, user_id) -> Response:
         return Response(_scim_resource(request._request, request.auth, self.binding(request, user_id)), content_type="application/scim+json")
 
+    @transaction.atomic
     def put(self, request: Request, tenant_slug: str, user_id) -> Response:
         token = request.auth
         binding = self.binding(request, user_id)
@@ -692,6 +708,7 @@ class SCIMUserDetailView(APIView):
             return _scim_error("The SCIM user resource is invalid or conflicts with an existing account.", "invalidValue", 400)
         return Response(_scim_resource(request._request, token, binding), content_type="application/scim+json")
 
+    @transaction.atomic
     def patch(self, request: Request, tenant_slug: str, user_id) -> Response:
         token = request.auth
         binding = self.binding(request, user_id)
@@ -739,6 +756,7 @@ class SCIMUserDetailView(APIView):
             return _scim_error("The SCIM patch could not be applied atomically.", "invalidValue", 400)
         return Response(_scim_resource(request._request, token, binding), content_type="application/scim+json")
 
+    @transaction.atomic
     def delete(self, request: Request, tenant_slug: str, user_id) -> Response:
         token = request.auth
         binding = self.binding(request, user_id)
