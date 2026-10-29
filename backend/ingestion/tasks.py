@@ -6,10 +6,12 @@ import hashlib
 import hmac
 import io
 import logging
+from datetime import timedelta
 
 from celery import Task, shared_task
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.utils import timezone
 
 from audit.models import AuditLog
 from ingestion.parsers import ClaimDeconstructionParser
@@ -17,12 +19,43 @@ from patents.models import Claim, Patent, PatentDocumentVersion
 
 logger = logging.getLogger(__name__)
 
+MAX_PDF_PAGES = 2_000
+MAX_EXTRACTED_CHARACTERS = 25_000_000
+PROCESSING_LEASE = timedelta(minutes=45)
+
+
+class PDFResourceLimitError(ValueError):
+    """Raised when a PDF exceeds the configured extraction resource limits."""
+
+
+def _bounded_join_pages(pages, page_count: int) -> tuple[str, int]:
+    if page_count > MAX_PDF_PAGES:
+        raise PDFResourceLimitError(
+            f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
+        )
+    extracted_pages: list[str] = []
+    total_characters = 0
+    for page in pages:
+        page_text = page.extract_text() or ""
+        total_characters += len(page_text) + (1 if extracted_pages else 0)
+        if total_characters > MAX_EXTRACTED_CHARACTERS:
+            raise PDFResourceLimitError(
+                "PDF text exceeds the 25-million-character extraction limit."
+            )
+        extracted_pages.append(page_text)
+    extracted_text = "\n".join(extracted_pages).strip()
+    if len(extracted_text) > MAX_EXTRACTED_CHARACTERS:
+        raise PDFResourceLimitError(
+            "PDF text exceeds the 25-million-character extraction limit."
+        )
+    return extracted_text, page_count
+
 
 def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
-    """Extract text and page count with pypdf, falling back to PyMuPDF.
+    """Extract bounded text with pypdf, falling back to PyMuPDF.
 
-    Install ``pypdf`` or ``PyMuPDF`` in the worker image. Keeping both imports
-    optional lets deployments choose either extraction library.
+    Limits are checked before iterating pages and after each page extraction to
+    prevent unbounded document/page accumulation in a background worker.
     """
     extraction_errors: list[Exception] = []
 
@@ -33,16 +66,20 @@ def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
     else:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-            page_text = [page.extract_text() or "" for page in reader.pages]
-            extracted_text = "\n".join(page_text).strip()
-            if extracted_text:
-                return extracted_text, len(reader.pages)
-            extraction_errors.append(
-                ValueError(
-                    "pypdf did not extract readable text from this PDF."
+            page_count = len(reader.pages)
+            if page_count > MAX_PDF_PAGES:
+                raise PDFResourceLimitError(
+                    f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
                 )
+            extracted_text, page_count = _bounded_join_pages(reader.pages, page_count)
+            if extracted_text:
+                return extracted_text, page_count
+            extraction_errors.append(
+                ValueError("pypdf did not extract readable text from this PDF.")
             )
-        except Exception as exc:  # Continue to the alternate supported parser.
+        except PDFResourceLimitError:
+            raise
+        except Exception as exc:
             extraction_errors.append(exc)
 
     try:
@@ -52,31 +89,44 @@ def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
     else:
         try:
             with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
-                page_text = [
-                    page.get_text("text") or "" for page in pdf_document
-                ]
-                extracted_text = "\n".join(page_text).strip()
-                if extracted_text:
-                    return extracted_text, pdf_document.page_count
-                extraction_errors.append(
-                    ValueError(
-                        "PyMuPDF did not extract readable text from this PDF."
+                page_count = pdf_document.page_count
+                if page_count > MAX_PDF_PAGES:
+                    raise PDFResourceLimitError(
+                        f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
                     )
-                )
-        except Exception as exc:  # Record and retry extraction errors.
+                # PyMuPDF pages expose get_text(), not pypdf's extract_text().
+                page_texts: list[str] = []
+                total_characters = 0
+                for page in pdf_document:
+                    page_text = page.get_text("text") or ""
+                    total_characters += len(page_text) + (1 if page_texts else 0)
+                    if total_characters > MAX_EXTRACTED_CHARACTERS:
+                        raise PDFResourceLimitError(
+                            "PDF text exceeds the 25-million-character extraction limit."
+                        )
+                    page_texts.append(page_text)
+                extracted_text = "\n".join(page_texts).strip()
+                if len(extracted_text) > MAX_EXTRACTED_CHARACTERS:
+                    raise PDFResourceLimitError(
+                        "PDF text exceeds the 25-million-character extraction limit."
+                    )
+            if extracted_text:
+                return extracted_text, page_count
+            extraction_errors.append(
+                ValueError("PyMuPDF did not extract readable text from this PDF.")
+            )
+        except PDFResourceLimitError:
+            raise
+        except Exception as exc:
             extraction_errors.append(exc)
 
     if not extraction_errors:
         raise RuntimeError("No PDF extraction backend is available.")
     if all(isinstance(error, ImportError) for error in extraction_errors):
         raise RuntimeError(
-            "PDF extraction requires pypdf or PyMuPDF; install one in the "
-            "worker image."
+            "PDF extraction requires pypdf or PyMuPDF; install one in the worker image."
         ) from extraction_errors[-1]
-    raise RuntimeError("Unable to extract readable text from the PDF.") from (
-        extraction_errors[-1]
-    )
-
+    raise RuntimeError("Unable to extract readable text from the PDF.") from extraction_errors[-1]
 
 def _record_extraction_failure(
     document_version: PatentDocumentVersion,
@@ -89,7 +139,8 @@ def _record_extraction_failure(
             pk=document_version.pk,
             tenant_id=document_version.tenant_id,
         ).update(
-            extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED
+            extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED,
+            extraction_started_at=None,
         )
         Patent.objects.filter(
             pk=document_version.patent_id,
@@ -133,18 +184,35 @@ def process_patent_document_version(
     document_version: PatentDocumentVersion | None = None
 
     try:
-        document_version = (
-            PatentDocumentVersion.objects.select_related("patent")
-            .get(pk=document_version_id)
-        )
-        document_version.extraction_status = (
-            PatentDocumentVersion.ExtractionStatus.EXTRACTING
-        )
-        document_version.save(update_fields=("extraction_status",))
-        Patent.objects.filter(
-            pk=document_version.patent_id,
-            tenant_id=document_version.tenant_id,
-        ).update(status=Patent.Status.PROCESSING)
+        with transaction.atomic():
+            document_version = (
+                PatentDocumentVersion.objects.select_for_update()
+                .select_related("patent")
+                .get(pk=document_version_id)
+            )
+            if document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+                return {
+                    "document_version_id": str(document_version.pk),
+                    "extraction_status": document_version.extraction_status,
+                    "idempotent": 1,
+                }
+            if (
+                document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTING
+                and document_version.extraction_started_at
+                and document_version.extraction_started_at > timezone.now() - PROCESSING_LEASE
+            ):
+                return {
+                    "document_version_id": str(document_version.pk),
+                    "extraction_status": document_version.extraction_status,
+                    "already_processing": 1,
+                }
+            document_version.extraction_status = PatentDocumentVersion.ExtractionStatus.EXTRACTING
+            document_version.extraction_started_at = timezone.now()
+            document_version.save(update_fields=("extraction_status", "extraction_started_at"))
+            Patent.objects.filter(
+                pk=document_version.patent_id,
+                tenant_id=document_version.tenant_id,
+            ).update(status=Patent.Status.PROCESSING)
 
         if document_version.patent.tenant_id != document_version.tenant_id:
             raise ValueError(
@@ -196,9 +264,8 @@ def process_patent_document_version(
                 pk=document_version.pk,
                 tenant_id=document_version.tenant_id,
             ).update(
-                extraction_status=(
-                    PatentDocumentVersion.ExtractionStatus.EXTRACTED
-                ),
+                extraction_status=PatentDocumentVersion.ExtractionStatus.EXTRACTED,
+                extraction_started_at=None,
                 page_count=page_count,
             )
 
@@ -249,4 +316,7 @@ def process_patent_document_version(
                 "No tenant context is available to audit failed version %s.",
                 document_version_id,
             )
+        if isinstance(exc, PDFResourceLimitError):
+            # Retrying an over-limit artifact cannot succeed and amplifies CPU cost.
+            raise
         raise self.retry(exc=exc, countdown=60)
