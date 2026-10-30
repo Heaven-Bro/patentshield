@@ -12,6 +12,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from pgvector.django import VectorField
 
 
 class PatentPublication(models.Model):
@@ -20,6 +21,7 @@ class PatentPublication(models.Model):
     class Provider(models.TextChoices):
         USPTO = "USPTO", "USPTO Open Data Portal"
         EPO = "EPO", "European Patent Office OPS"
+        DATASET = "DATASET", "Curated Public Patent Dataset"
 
     class LegalStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -28,6 +30,32 @@ class PatentPublication(models.Model):
         LAPSED = "LAPSED", "Lapsed"
         ABANDONED = "ABANDONED", "Abandoned or withdrawn"
         UNKNOWN = "UNKNOWN", "Unknown"
+
+    class Sector(models.TextChoices):
+        MACHINE_LEARNING_DATA_PRIVACY = (
+            "machine_learning_data_privacy",
+            "Machine Learning Data Privacy",
+        )
+        CLOUD_COMPUTING_TENANT_ISOLATION = (
+            "cloud_computing_tenant_isolation",
+            "Cloud Computing Tenant Isolation",
+        )
+        FEDERATED_LEARNING_ENCRYPTION = (
+            "federated_learning_encryption",
+            "Federated Learning Encryption",
+        )
+        FIVE_G_NETWORK_SLICING = (
+            "5g_network_slicing",
+            "5G Network Slicing",
+        )
+        WIRELESS_SENSOR_DATA_ROUTING = (
+            "wireless_sensor_data_routing",
+            "Wireless Sensor Data Routing",
+        )
+        IOT_DEVICE_AUTHENTICATION = (
+            "iot_device_authentication",
+            "IoT Device Authentication",
+        )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     provider = models.CharField(max_length=10, choices=Provider.choices)
@@ -38,6 +66,20 @@ class PatentPublication(models.Model):
     kind_code = models.CharField(max_length=10, blank=True, null=True)
     title = models.TextField()
     abstract = models.TextField(blank=True, null=True)
+    
+    sector_label = models.CharField(
+        max_length=64,
+        choices=Sector.choices,
+        blank=True,
+        default="",
+        db_index=True,
+    )
+    embedding = VectorField(
+        dimensions=384,
+        null=True,
+        blank=True,
+    )
+
     filing_date = models.DateField(blank=True, null=True)
     publication_date = models.DateField(blank=True, null=True)
     grant_date = models.DateField(blank=True, null=True)
@@ -89,6 +131,10 @@ class PatentPublication(models.Model):
             models.Index(
                 fields=("last_synced_at",),
                 name="pat_pub_lastsync_idx",
+            ),
+            models.Index(
+                fields=("sector_label",),
+                name="pat_pub_sector_idx",
             ),
         ]
         ordering = ("-publication_date", "publication_number")

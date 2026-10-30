@@ -1644,9 +1644,7 @@ typing-inspection==0.4.4 \
 tzdata==2026.5 \
     --hash=sha256:8cc73c0a0bfca7dbfa59235d60b2eff82231dee33f53d206db1acd9173cfc0a7 \
     --hash=sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac
-    # via
-    #   kombu
-    #   python-dateutil
+    # via kombu
 tzlocal==5.4.5 \
     --hash=sha256:ba976898bad27945178c9ca25c222c19e322b30c10342b9f40b46714f70d2d5f \
     --hash=sha256:ecab534f6d65d9deb4c4ea52c121ab6dd5958e9b878e71dcb102578269752454
@@ -2031,6 +2029,9 @@ websockets==17.3 \
     # via
     #   langgraph-sdk
     #   langsmith
+whitenoise==6.8.0 \
+    --hash=sha256:58c4663bd050decb7fe06781ec26984e80895ee7178d3ee5d53e31086596b11f
+    # via -r requirements.in
 xmlsec==1.3.17 \
     --hash=sha256:00d43d4f68ac6b11f6e1e69bcb389495f54da77bf1168b4de08f4a7785e47bbb \
     --hash=sha256:040f28a7aacfdb467df46d423e4af05569e9376bc8c7f6416b0761e16a0e3d0b \
@@ -2471,4 +2472,3 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via langsmith
-whitenoise==6.8.0 --hash=sha256:58c4663bd050decb7fe06781ec26984e80895ee7178d3ee5d53e31086596b11f
