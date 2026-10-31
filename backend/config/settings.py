@@ -255,6 +255,27 @@ PATENTSHIELD_RERANKER_MODEL_NAME = (
     or "BAAI/bge-reranker-v2-m3"
 )
 
+# Phase 3/4 — public patent semantic search uses a distinct 384-d MiniLM model.
+PATENTSHIELD_MINILM_MODEL_NAME = (
+    os.getenv("PATENTSHIELD_MINILM_MODEL_PATH", "").strip()
+    or os.getenv(
+        "PATENTSHIELD_MINILM_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"
+    ).strip()
+    or "sentence-transformers/all-MiniLM-L6-v2"
+)
+PATENTSHIELD_MINILM_BATCH_SIZE = int(os.getenv("PATENTSHIELD_MINILM_BATCH_SIZE", "32"))
+PATENTSHIELD_MINILM_DEVICE = os.getenv("PATENTSHIELD_MINILM_DEVICE", "").strip()
+PATENTSHIELD_MINILM_LOCAL_FILES_ONLY = _env_bool(
+    "PATENTSHIELD_MINILM_LOCAL_FILES_ONLY", PATENTSHIELD_OFFLINE_MODE
+)
+PATENTSHIELD_MINILM_PRELOAD_ON_STARTUP = _env_bool(
+    "PATENTSHIELD_MINILM_PRELOAD_ON_STARTUP", False
+)
+if not 1 <= PATENTSHIELD_MINILM_BATCH_SIZE <= 512:
+    raise ImproperlyConfigured(
+        "PATENTSHIELD_MINILM_BATCH_SIZE must be between 1 and 512."
+    )
+
 # Private object storage is optional. The filesystem backend remains the default
 # for existing deployments; production object-storage mode requires explicit
 # server-side encryption using a customer-managed KMS key.
@@ -435,6 +456,36 @@ PATENTSHIELD_EXTERNAL_QUERY_HASH_KEY = os.getenv(
 ).strip()
 USPTO_ODP_API_KEY = os.getenv("USPTO_ODP_API_KEY", "").strip()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+
+# Phase 5 — OpenAI-compatible Meta LLM endpoint (Muse Spark 1.3).
+# A missing key/base URL disables these external inference features by default.
+META_LLM_API_KEY = os.getenv("META_LLM_API_KEY", "").strip()
+META_LLM_BASE_URL = os.getenv("META_LLM_BASE_URL", "").strip().rstrip("/")
+META_LLM_MODEL = os.getenv("META_LLM_MODEL", "Muse Spark 1.3").strip() or "Muse Spark 1.3"
+META_LLM_TIMEOUT_SECONDS = float(os.getenv("META_LLM_TIMEOUT_SECONDS", "60"))
+META_LLM_ENABLED = _env_bool(
+    "META_LLM_ENABLED", bool(META_LLM_API_KEY and META_LLM_BASE_URL)
+) and not PATENTSHIELD_OFFLINE_MODE
+META_LLM_ALLOW_SENSITIVE_DATA = _env_bool(
+    "META_LLM_ALLOW_SENSITIVE_DATA", False
+)
+if META_LLM_TIMEOUT_SECONDS <= 0:
+    raise ImproperlyConfigured("META_LLM_TIMEOUT_SECONDS must be positive.")
+if META_LLM_BASE_URL:
+    _meta_llm_url = urlsplit(META_LLM_BASE_URL)
+    if (
+        _meta_llm_url.scheme not in {"http", "https"}
+        or not _meta_llm_url.netloc
+        or _meta_llm_url.username
+        or _meta_llm_url.password
+        or _meta_llm_url.query
+        or _meta_llm_url.fragment
+    ):
+        raise ImproperlyConfigured(
+            "META_LLM_BASE_URL must be an absolute HTTP(S) base URL without credentials, query, or fragment."
+        )
+    if not DEBUG and _meta_llm_url.scheme != "https":
+        raise ImproperlyConfigured("META_LLM_BASE_URL must use HTTPS in production.")
 EPO_OPS_CLIENT_ID = os.getenv("EPO_OPS_CLIENT_ID", "").strip()
 EPO_OPS_CLIENT_SECRET = os.getenv("EPO_OPS_CLIENT_SECRET", "").strip()
 PATENTSHIELD_USPTO_API_URL = os.getenv(

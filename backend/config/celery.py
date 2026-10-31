@@ -21,6 +21,7 @@ app.conf.update(
     ),
     imports=("reports.claim_chart_tasks", "patents.surveillance_tasks", "office_actions.tasks", "fto.tasks", "landscapes.tasks"),
     task_routes={
+        "ingestion.tasks.generate_publication_embeddings": {"queue": "embedding"},
         "ingestion.tasks.*": {"queue": "ingestion"},
         "indexing.tasks.extract_and_index_schematics": {"queue": "ingestion"},
         "indexing.tasks.generate_document_embeddings": {"queue": "embedding"},
