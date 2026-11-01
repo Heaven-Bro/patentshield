@@ -1,34 +1,40 @@
-"""Celery tasks for extracting text and claims from patent documents."""
+"""Celery extraction stage for tenant-owned patent document versions."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import io
 import logging
+import random
+import uuid
 from datetime import timedelta
 
 from celery import Task, shared_task
-from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
 from audit.models import AuditLog
+from indexing.pdf_extraction import (
+    PDFDigestMismatchError,
+    PDFExtractionError,
+    PDFOCRRequiredError,
+    PDFResourceLimitError,
+    PermanentDocumentError,
+    extract_pdf_pages,
+    read_pdf_storage,
+    verify_pdf_digest,
+)
 from ingestion.parsers import ClaimDeconstructionParser
 from patents.models import Claim, Patent, PatentDocumentVersion
 
 logger = logging.getLogger(__name__)
 
+# Kept for compatibility with existing ingestion tests and callers.
 MAX_PDF_PAGES = 2_000
 MAX_EXTRACTED_CHARACTERS = 25_000_000
 PROCESSING_LEASE = timedelta(minutes=45)
 
 
-class PDFResourceLimitError(ValueError):
-    """Raised when a PDF exceeds the configured extraction resource limits."""
-
-
 def _bounded_join_pages(pages, page_count: int) -> tuple[str, int]:
+    """Legacy bounded helper retained for tests that exercise pypdf page mocks."""
     if page_count > MAX_PDF_PAGES:
         raise PDFResourceLimitError(
             f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
@@ -52,95 +58,75 @@ def _bounded_join_pages(pages, page_count: int) -> tuple[str, int]:
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> tuple[str, int]:
-    """Extract bounded text with pypdf, falling back to PyMuPDF.
+    """Use the shared bounded PyMuPDF + page-level Tesseract extraction service."""
+    result = extract_pdf_pages(pdf_bytes)
+    return "\n".join(result.pages).strip(), result.page_count
 
-    Limits are checked before iterating pages and after each page extraction to
-    prevent unbounded document/page accumulation in a background worker.
-    """
-    extraction_errors: list[Exception] = []
 
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        extraction_errors.append(exc)
-    else:
+def _retry_countdown(retries: int) -> float:
+    """Exponential retry delay with full jitter, capped at five minutes."""
+    ceiling = min(300.0, 2.0 ** min(max(retries, 0), 8))
+    return random.uniform(0.5, max(0.5, ceiling))
+
+
+
+
+def _dispatch_pending_index_stages(document_version: PatentDocumentVersion) -> int:
+    """Dispatch only unreserved pending stages, preserving partial dispatches."""
+    from indexing.tasks import extract_and_index_schematics, generate_document_embeddings
+
+    dispatches = (
+        (
+            "text_indexing_status", "text_indexing_task_id",
+            PatentDocumentVersion.StageStatus.PENDING,
+            generate_document_embeddings, "embedding",
+        ),
+        (
+            "schematic_indexing_status", "schematic_indexing_task_id",
+            PatentDocumentVersion.StageStatus.PENDING,
+            extract_and_index_schematics, "ingestion",
+        ),
+    )
+    queued = 0
+    for status_field, task_id_field, pending_value, task, queue in dispatches:
+        task_id = str(uuid.uuid4())
+        changed = PatentDocumentVersion.objects.filter(
+            pk=document_version.pk, tenant_id=document_version.tenant_id,
+            **{status_field: pending_value, task_id_field: ""},
+        ).update(**{task_id_field: task_id})
+        if not changed:
+            continue
         try:
-            reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-            page_count = len(reader.pages)
-            if page_count > MAX_PDF_PAGES:
-                raise PDFResourceLimitError(
-                    f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
-                )
-            extracted_text, page_count = _bounded_join_pages(reader.pages, page_count)
-            if extracted_text:
-                return extracted_text, page_count
-            extraction_errors.append(
-                ValueError("pypdf did not extract readable text from this PDF.")
+            task.apply_async(
+                args=[str(document_version.pk)], queue=queue, task_id=task_id
             )
-        except PDFResourceLimitError:
+            queued += 1
+        except Exception:
+            PatentDocumentVersion.objects.filter(
+                pk=document_version.pk, tenant_id=document_version.tenant_id,
+                **{task_id_field: task_id},
+            ).update(**{task_id_field: ""})
             raise
-        except Exception as exc:
-            extraction_errors.append(exc)
+    return queued
 
-    try:
-        import fitz  # type: ignore[import-not-found]
-    except ImportError as exc:
-        extraction_errors.append(exc)
-    else:
-        try:
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
-                page_count = pdf_document.page_count
-                if page_count > MAX_PDF_PAGES:
-                    raise PDFResourceLimitError(
-                        f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}."
-                    )
-                # PyMuPDF pages expose get_text(), not pypdf's extract_text().
-                page_texts: list[str] = []
-                total_characters = 0
-                for page in pdf_document:
-                    page_text = page.get_text("text") or ""
-                    total_characters += len(page_text) + (1 if page_texts else 0)
-                    if total_characters > MAX_EXTRACTED_CHARACTERS:
-                        raise PDFResourceLimitError(
-                            "PDF text exceeds the 25-million-character extraction limit."
-                        )
-                    page_texts.append(page_text)
-                extracted_text = "\n".join(page_texts).strip()
-                if len(extracted_text) > MAX_EXTRACTED_CHARACTERS:
-                    raise PDFResourceLimitError(
-                        "PDF text exceeds the 25-million-character extraction limit."
-                    )
-            if extracted_text:
-                return extracted_text, page_count
-            extraction_errors.append(
-                ValueError("PyMuPDF did not extract readable text from this PDF.")
-            )
-        except PDFResourceLimitError:
-            raise
-        except Exception as exc:
-            extraction_errors.append(exc)
-
-    if not extraction_errors:
-        raise RuntimeError("No PDF extraction backend is available.")
-    if all(isinstance(error, ImportError) for error in extraction_errors):
-        raise RuntimeError(
-            "PDF extraction requires pypdf or PyMuPDF; install one in the worker image."
-        ) from extraction_errors[-1]
-    raise RuntimeError("Unable to extract readable text from the PDF.") from extraction_errors[-1]
 
 def _record_extraction_failure(
     document_version: PatentDocumentVersion,
     task: Task,
     error: Exception,
+    *,
+    status_value: str = PatentDocumentVersion.ExtractionStatus.EXTRACTION_FAILED,
 ) -> None:
-    """Persist failure status and an audit event without masking the cause."""
+    """Persist terminal extraction state and a correlated audit event."""
+    error_code = type(error).__name__[:64]
     try:
         PatentDocumentVersion.objects.filter(
             pk=document_version.pk,
             tenant_id=document_version.tenant_id,
         ).update(
-            extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED,
+            extraction_status=status_value,
             extraction_started_at=None,
+            extraction_error_code=error_code,
         )
         Patent.objects.filter(
             pk=document_version.patent_id,
@@ -163,27 +149,35 @@ def _record_extraction_failure(
             outcome=AuditLog.Outcome.FAILURE,
             metadata={
                 "error_type": type(error).__name__,
+                "error_code": error_code,
                 "task_id": task.request.id,
                 "retry_attempt": task.request.retries,
+                "extraction_status": status_value,
             },
         )
     except Exception:
-        # Audit persistence must not prevent Celery retry behavior.
         logger.exception(
             "Could not persist extraction failure audit event for version %s.",
             document_version.pk,
         )
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(
+    bind=True,
+    max_retries=5,
+    soft_time_limit=960,
+    time_limit=990,
+    acks_late=True,
+)
 def process_patent_document_version(
     self: Task,
     document_version_id: str,
 ) -> dict[str, str | int]:
-    """Extract PDF text, deconstruct claims, and store results idempotently."""
+    """Extract searchable text/claims, then dispatch independent indexing stages."""
     document_version: PatentDocumentVersion | None = None
 
     try:
+        already_extracted = False
         with transaction.atomic():
             document_version = (
                 PatentDocumentVersion.objects.select_for_update()
@@ -191,12 +185,8 @@ def process_patent_document_version(
                 .get(pk=document_version_id)
             )
             if document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTED:
-                return {
-                    "document_version_id": str(document_version.pk),
-                    "extraction_status": document_version.extraction_status,
-                    "idempotent": 1,
-                }
-            if (
+                already_extracted = True
+            elif (
                 document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTING
                 and document_version.extraction_started_at
                 and document_version.extraction_started_at > timezone.now() - PROCESSING_LEASE
@@ -206,38 +196,40 @@ def process_patent_document_version(
                     "extraction_status": document_version.extraction_status,
                     "already_processing": 1,
                 }
-            document_version.extraction_status = PatentDocumentVersion.ExtractionStatus.EXTRACTING
-            document_version.extraction_started_at = timezone.now()
-            document_version.save(update_fields=("extraction_status", "extraction_started_at"))
-            Patent.objects.filter(
-                pk=document_version.patent_id,
-                tenant_id=document_version.tenant_id,
-            ).update(status=Patent.Status.PROCESSING)
+            if not already_extracted:
+                document_version.extraction_status = PatentDocumentVersion.ExtractionStatus.EXTRACTING
+                document_version.extraction_started_at = timezone.now()
+                document_version.text_indexing_task_id = ""
+                document_version.schematic_indexing_task_id = ""
+                document_version.save(update_fields=(
+                    "extraction_status", "extraction_started_at",
+                    "text_indexing_task_id", "schematic_indexing_task_id",
+                ))
+                Patent.objects.filter(
+                    pk=document_version.patent_id,
+                    tenant_id=document_version.tenant_id,
+                ).update(status=Patent.Status.PROCESSING)
+
+        if already_extracted:
+            queued = _dispatch_pending_index_stages(document_version)
+            return {
+                "document_version_id": str(document_version.pk),
+                "extraction_status": document_version.extraction_status,
+                "indexing_tasks_dispatched": queued,
+                "idempotent": 1,
+            }
 
         if document_version.patent.tenant_id != document_version.tenant_id:
-            raise ValueError(
-                "Patent and document version must belong to the same tenant."
-            )
+            raise PDFExtractionError("Patent and document version tenant ownership do not match.")
 
-        with default_storage.open(
-            document_version.storage_key, "rb"
-        ) as file_obj:
-            pdf_bytes = file_obj.read()
-        if not pdf_bytes:
-            raise ValueError("The stored patent document is empty.")
+        pdf_bytes = read_pdf_storage(document_version.storage_key)
+        verify_pdf_digest(pdf_bytes, document_version.content_sha256)
+        extracted = extract_pdf_pages(pdf_bytes)
+        raw_text = "\n".join(extracted.pages).strip()
+        if not raw_text:
+            raise PDFExtractionError("No searchable text chunks can be built from this document.")
 
-        calculated_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
-        expected_sha256 = document_version.content_sha256.strip().lower()
-        if not hmac.compare_digest(calculated_sha256, expected_sha256):
-            raise ValueError(
-                "Stored document SHA-256 does not match its metadata."
-            )
-
-        raw_text, page_count = _extract_pdf_text(pdf_bytes)
-        parsed_claims = (
-            ClaimDeconstructionParser.parse_claims_from_text(raw_text)
-        )
-
+        parsed_claims = ClaimDeconstructionParser.parse_claims_from_text(raw_text)
         claim_records = [
             Claim(
                 tenant_id=document_version.tenant_id,
@@ -249,74 +241,129 @@ def process_patent_document_version(
                 depends_on_claim_number=claim["depends_on_claim_number"],
             )
             for claim in parsed_claims
+            if str(claim.get("claim_text") or "").strip()
         ]
 
-        # Replace claims and mark the version extracted in one transaction so
-        # retries cannot leave duplicate or partially written claim rows.
         with transaction.atomic():
             Claim.objects.filter(
                 tenant_id=document_version.tenant_id,
                 patent_id=document_version.patent_id,
                 document_version_id=document_version.pk,
             ).delete()
-            Claim.objects.bulk_create(claim_records, batch_size=500)
+            Claim.objects.bulk_create(claim_records, batch_size=200)
             PatentDocumentVersion.objects.filter(
                 pk=document_version.pk,
                 tenant_id=document_version.tenant_id,
             ).update(
                 extraction_status=PatentDocumentVersion.ExtractionStatus.EXTRACTED,
                 extraction_started_at=None,
-                page_count=page_count,
+                page_count=extracted.page_count,
+                text_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
+                schematic_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
+                extraction_error_code="",
+                schematic_indexing_error_code="",
+                text_indexing_task_id="",
+                schematic_indexing_task_id="",
             )
 
-        # Extraction is the first stage of the document pipeline. Dispatch text
-        # embeddings and schematic crops only after claims/status are committed.
-        # Both downstream tasks are idempotent and can safely be retried.
-        from indexing.tasks import (
-            extract_and_index_schematics,
-            generate_document_embeddings,
-        )
+        # Refresh the in-memory state after the queryset update above. The
+        # exception handler uses EXTRACTED to distinguish a broker-dispatch
+        # failure from a true extraction failure.
+        document_version.refresh_from_db(fields=(
+            "extraction_status", "text_indexing_status", "schematic_indexing_status",
+            "text_indexing_task_id", "schematic_indexing_task_id",
+        ))
 
-        generate_document_embeddings.apply_async(
-            args=[str(document_version.pk)],
-            queue="embedding",
-        )
-        extract_and_index_schematics.apply_async(
-            args=[str(document_version.pk)],
-            queue="ingestion",
-        )
-
+        # Independent stages are durably reserved before dispatch. If one
+        # broker publish fails, the extraction task retries and dispatches only
+        # the stage whose task ID is still empty.
+        dispatched = _dispatch_pending_index_stages(document_version)
         logger.info(
-            "Extracted patent document version %s: %d page(s), %d claim(s).",
+            "Extracted document version %s: %s pages, %s OCR pages, %s claims.",
             document_version.pk,
-            page_count,
+            extracted.page_count,
+            extracted.ocr_pages,
             len(claim_records),
         )
         return {
             "document_version_id": str(document_version.pk),
-            "extraction_status": (
-                PatentDocumentVersion.ExtractionStatus.EXTRACTED
-            ),
-            "page_count": page_count,
+            "extraction_status": PatentDocumentVersion.ExtractionStatus.EXTRACTED,
+            "page_count": extracted.page_count,
+            "ocr_pages": extracted.ocr_pages,
             "claims_created": len(claim_records),
-            "indexing_tasks_dispatched": 2,
+            "indexing_tasks_dispatched": dispatched,
         }
 
     except Exception as exc:
         logger.exception(
-            "Patent document extraction failed for version ID %s.",
+            "Patent document extraction failed for version ID %s (task=%s, retry=%s).",
             document_version_id,
+            self.request.id,
+            self.request.retries,
         )
-        if document_version is not None:
-            _record_extraction_failure(document_version, self, exc)
-        else:
-            # A tenant-scoped AuditLog row cannot safely be created when the
-            # document version (and therefore its tenant) cannot be resolved.
-            logger.error(
-                "No tenant context is available to audit failed version %s.",
-                document_version_id,
+        if (
+            document_version is not None
+            and document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTED
+        ):
+            if self.request.retries >= self.max_retries:
+                PatentDocumentVersion.objects.filter(
+                    pk=document_version.pk, tenant_id=document_version.tenant_id,
+                    text_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
+                    text_indexing_task_id="",
+                ).update(
+                    text_indexing_status=PatentDocumentVersion.StageStatus.FAILED,
+                    text_indexing_error_code="QUEUE_FAILED",
+                )
+                PatentDocumentVersion.objects.filter(
+                    pk=document_version.pk, tenant_id=document_version.tenant_id,
+                    schematic_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
+                    schematic_indexing_task_id="",
+                ).update(
+                    schematic_indexing_status=PatentDocumentVersion.StageStatus.FAILED,
+                    schematic_indexing_error_code="QUEUE_FAILED",
+                )
+                raise
+            raise self.retry(exc=exc, countdown=_retry_countdown(self.request.retries))
+
+        if document_version is not None and isinstance(exc, PermanentDocumentError):
+            final_status = (
+                PatentDocumentVersion.ExtractionStatus.OCR_REQUIRED
+                if isinstance(exc, PDFOCRRequiredError)
+                else PatentDocumentVersion.ExtractionStatus.EXTRACTION_FAILED
             )
-        if isinstance(exc, PDFResourceLimitError):
-            # Retrying an over-limit artifact cannot succeed and amplifies CPU cost.
+            _record_extraction_failure(
+                document_version, self, exc, status_value=final_status
+            )
             raise
-        raise self.retry(exc=exc, countdown=60)
+
+        if self.request.retries >= self.max_retries:
+            if document_version is not None:
+                _record_extraction_failure(document_version, self, exc)
+            raise
+
+        if document_version is not None:
+            PatentDocumentVersion.objects.filter(
+                pk=document_version.pk,
+                tenant_id=document_version.tenant_id,
+            ).update(
+                extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
+                extraction_started_at=None,
+            )
+            try:
+                AuditLog.objects.create(
+                    tenant_id=document_version.tenant_id,
+                    actor_user_id=document_version.patent.created_by_id,
+                    action="PROCESS_PATENT_DOCUMENT_VERSION_RETRY",
+                    resource_type="PatentDocumentVersion",
+                    resource_id=document_version.pk,
+                    request_id=self.request.id,
+                    outcome=AuditLog.Outcome.FAILURE,
+                    metadata={
+                        "error_type": type(exc).__name__,
+                        "task_id": self.request.id,
+                        "retry_attempt": self.request.retries,
+                    },
+                )
+            except Exception:
+                logger.exception("Could not persist extraction retry audit for %s.", document_version.pk)
+        raise self.retry(exc=exc, countdown=_retry_countdown(self.request.retries))
