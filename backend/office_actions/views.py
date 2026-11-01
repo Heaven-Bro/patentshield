@@ -7,6 +7,7 @@ import os
 import uuid
 from urllib.parse import quote
 
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
@@ -199,8 +200,13 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
         if patent.tenant_id != tenant.pk:
             raise NotFound("Patent not found in this tenant.")
         upload = values["file"]
+        max_upload_bytes = int(getattr(settings, "PATENTSHIELD_MAX_PDF_UPLOAD_BYTES", 100 * 1024 * 1024))
+        if max_upload_bytes <= 0 or upload.size <= 0 or upload.size > max_upload_bytes:
+            raise ValidationError({"file": "The office-action PDF is empty or exceeds the configured upload size limit."})
         upload.seek(0)
-        file_bytes = upload.read()
+        file_bytes = upload.read(max_upload_bytes + 1)
+        if len(file_bytes) > max_upload_bytes:
+            raise ValidationError({"file": "The office-action PDF exceeds the configured upload size limit."})
         digest = hashlib.sha256(file_bytes).hexdigest()
         file_suffix = os.path.splitext(os.path.basename(getattr(upload, "name", "office-action.pdf")))[1].lower()
         if file_suffix != ".pdf":

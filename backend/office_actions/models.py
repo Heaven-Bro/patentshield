@@ -19,7 +19,9 @@ class OfficeAction(TenantScopedModel):
         PROCESSING = "PROCESSING", "Processing"
         RETRYING = "RETRYING", "Retrying"
         EXTRACTED = "EXTRACTED", "Extracted"
-        FAILED = "FAILED", "Failed"
+        OCR_REQUIRED = "OCR_REQUIRED", "OCR required"
+        EXTRACTION_FAILED = "EXTRACTION_FAILED", "Extraction failed"
+        FAILED = "FAILED", "Failed (legacy)"
 
     class ParseStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -50,7 +52,7 @@ class OfficeAction(TenantScopedModel):
     page_count = models.PositiveIntegerField(null=True, blank=True)
     extracted_text = models.TextField(blank=True, default="")
     extracted_pages = models.JSONField(default=list, blank=True)
-    extraction_status = models.CharField(max_length=12, choices=ExtractionStatus.choices, default=ExtractionStatus.PENDING, db_index=True)
+    extraction_status = models.CharField(max_length=20, choices=ExtractionStatus.choices, default=ExtractionStatus.PENDING, db_index=True)
     parse_status = models.CharField(max_length=12, choices=ParseStatus.choices, default=ParseStatus.PENDING, db_index=True)
     extraction_error_code = models.CharField(max_length=80, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
