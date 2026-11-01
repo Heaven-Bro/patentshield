@@ -12,6 +12,8 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from enterprise_identity.services import filter_visible_matter_queryset, matter_access_allowed
+from tenants.models import Tenant
 from analyses.models import AnalysisReport, ClaimAssessment, EvidenceReference
 from audit.models import AuditLog
 from indexing.models import TextChunk
@@ -38,17 +40,40 @@ def persist_analysis_result(
     """
     with transaction.atomic():
         analysis = (
-            AnalysisReport.objects.select_related(
-                "patent",
-                "target_document_version",
-                "target_claim",
-                "created_by",
+            AnalysisReport.objects.only(
+                "pk", "tenant_id", "patent_id", "target_document_version_id", "created_by_id"
             )
+            .select_related("created_by")
             .select_for_update(of=("self",))
             .get(pk=analysis_id)
         )
         tenant_id = analysis.tenant_id
+        tenant = Tenant.objects.get(pk=tenant_id)
+        if not analysis.created_by.is_active:
+            raise PermissionError("Analysis creator account is inactive.")
+        if (
+            not matter_access_allowed(
+                tenant=tenant, user=analysis.created_by, matter_type="analysis",
+                matter_id=analysis.pk, required="READ",
+            )
+            or not matter_access_allowed(
+                tenant=tenant, user=analysis.created_by, matter_type="patent",
+                matter_id=analysis.patent_id, required="READ",
+            )
+        ):
+            raise PermissionError(
+                "Analysis creator no longer has analysis and patent READ access."
+            )
+        # Hydrate content-bearing relations only after the creator's READ grant.
+        analysis = (
+            AnalysisReport.objects.select_related("patent", "target_document_version", "created_by")
+            .get(pk=analysis_id)
+        )
         _validate_analysis_provenance(analysis)
+        visible_patent_ids = filter_visible_matter_queryset(
+            Patent.objects.for_tenant(tenant_id), tenant=tenant,
+            user=analysis.created_by, matter_type="patent",
+        ).values_list("pk", flat=True)
         target_claim = _resolve_target_claim(analysis, graph_state)
 
         raw_limitations = graph_state.get("limitations", [])
@@ -144,7 +169,10 @@ def persist_analysis_result(
                 if not exact_quote.strip():
                     continue
 
-                chunk = _canonical_chunk(evidence.get("chunk_id"), tenant_id)
+                chunk = _canonical_chunk(
+                    evidence.get("chunk_id"), tenant_id,
+                    visible_patent_ids=visible_patent_ids,
+                )
                 candidate_source_matches = _source_ids_match_chunk(evidence, chunk)
                 canonical_quote_matches = bool(
                     chunk is not None
@@ -380,8 +408,10 @@ def _resolve_target_claim(
     return claim
 
 
-def _canonical_chunk(chunk_id: Any, tenant_id: Any) -> TextChunk | None:
-    """Resolve a citation's chunk only inside the analysis tenant."""
+def _canonical_chunk(
+    chunk_id: Any, tenant_id: Any, *, visible_patent_ids=None,
+) -> TextChunk | None:
+    """Resolve a citation only inside the tenant and creator's READ-visible matters."""
     try:
         chunk_uuid = UUID(str(chunk_id))
     except (AttributeError, TypeError, ValueError):
@@ -392,6 +422,7 @@ def _canonical_chunk(chunk_id: Any, tenant_id: Any) -> TextChunk | None:
             pk=chunk_uuid,
             patent__tenant_id=tenant_id,
             document_version__tenant_id=tenant_id,
+            patent_id__in=visible_patent_ids if visible_patent_ids is not None else [],
         )
         .select_related("patent", "document_version")
         .first()

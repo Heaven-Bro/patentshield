@@ -72,6 +72,7 @@ def run_patent_analysis(
         initial_state: dict[str, Any] = {
             "analysis_id": str(report.pk),
             "tenant_id": str(report.tenant_id),
+            "actor_user_id": str(report.created_by_id),
             "target_patent_id": str(report.patent_id),
             "target_claim_number": claim.claim_number,
             "claim_text": claim.claim_text,
@@ -220,12 +221,39 @@ def _claim_analysis_for_execution(
     stale_before = timezone.now() - timedelta(minutes=45)
     with transaction.atomic():
         report = (
-            AnalysisReport.objects.select_for_update()
-            .select_related("patent", "target_document_version", "created_by")
+            AnalysisReport.objects.only(
+                "pk", "tenant_id", "patent_id", "target_document_version_id",
+                "created_by_id", "status", "started_at", "execution_task_id",
+            )
+            .select_related("created_by")
+            .select_for_update(of=("self",))
             .get(pk=analysis_id)
         )
         if report.status in _TERMINAL_STATUSES:
             return report, False
+        from enterprise_identity.services import matter_access_allowed
+        from tenants.models import Tenant
+
+        tenant = Tenant.objects.get(pk=report.tenant_id)
+        if (
+            not report.created_by.is_active
+            or not matter_access_allowed(
+                tenant=tenant, user=report.created_by, matter_type="analysis",
+                matter_id=report.pk, required="READ",
+            )
+            or not matter_access_allowed(
+                tenant=tenant, user=report.created_by, matter_type="patent",
+                matter_id=report.patent_id, required="READ",
+            )
+        ):
+            raise PermissionError(
+                "The analysis creator no longer has analysis and patent READ access."
+            )
+        # Only after READ authorization may patent/document relations be loaded.
+        report = (
+            AnalysisReport.objects.select_related("patent", "target_document_version", "created_by")
+            .get(pk=analysis_id)
+        )
         if report.status == AnalysisReport.Status.RUNNING:
             if report.started_at is not None and report.started_at >= stale_before:
                 delivery_info = getattr(task.request, "delivery_info", None) or {}
@@ -273,7 +301,20 @@ def _claim_analysis_for_execution(
 
 
 def _load_target_claim(report: AnalysisReport) -> Claim:
-    """Resolve and validate the chosen claim within the report's document."""
+    """Resolve the target claim only while the initiating user retains READ ACL."""
+    from django.contrib.auth import get_user_model
+    from enterprise_identity.services import matter_access_allowed
+    from tenants.models import Tenant
+
+    tenant = Tenant.objects.get(pk=report.tenant_id)
+    actor = get_user_model().objects.get(pk=report.created_by_id)
+    if not actor.is_active:
+        raise PermissionError("The analysis creator account is inactive.")
+    if not matter_access_allowed(
+        tenant=tenant, user=actor, matter_type="patent",
+        matter_id=report.patent_id, required="READ",
+    ):
+        raise PermissionError("The analysis creator no longer has patent READ access.")
     if report.target_claim_id:
         claim = (
             Claim.objects.for_tenant(report.tenant_id)

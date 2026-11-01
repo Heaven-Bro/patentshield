@@ -27,6 +27,54 @@ from tenants.permissions import HasTenantAccess, RequireTenantRole
 logger = logging.getLogger(__name__)
 
 
+def _get_authorized_analysis(
+    request: Request,
+    tenant,
+    analysis_id: UUID,
+    *,
+    analysis_permission: str = "READ",
+    patent_permission: str = "READ",
+    lock: bool = False,
+) -> AnalysisReport:
+    """Check matter grants using identifiers before loading private relations.
+
+    The first query selects only tenant/matter identifiers. Patent abstracts,
+    target-version details, claims, and evidence are fetched only after both the
+    analysis and patent ACL checks succeed.
+    """
+    lookup = AnalysisReport.objects.for_tenant(tenant.pk).only(
+        "pk", "tenant_id", "patent_id"
+    )
+    if lock:
+        lookup = lookup.select_for_update()
+    try:
+        reference = lookup.get(pk=analysis_id)
+    except AnalysisReport.DoesNotExist as exc:
+        raise NotFound("Analysis was not found.") from exc
+
+    require_matter_access(
+        request=request, matter_type="analysis", matter_id=reference.pk,
+        required=analysis_permission,
+    )
+    require_matter_access(
+        request=request, matter_type="patent", matter_id=reference.patent_id,
+        required=patent_permission,
+    )
+
+    analysis = (
+        AnalysisReport.objects.for_tenant(tenant.pk)
+        .select_related("patent", "target_document_version")
+        .get(pk=reference.pk)
+    )
+    if (
+        analysis.patent.tenant_id != tenant.pk
+        or analysis.target_document_version.tenant_id != tenant.pk
+        or analysis.target_document_version.patent_id != analysis.patent_id
+    ):
+        raise PermissionDenied("Analysis provenance does not match tenant context.")
+    return analysis
+
+
 class AnalysisCreateRequestSerializer(serializers.Serializer):
     """Validate the selected tenant-owned patent, version, and claim."""
 
@@ -82,7 +130,7 @@ class AnalysisListCreateView(APIView):
                 target_document_version__tenant_id=tenant.pk,
                 target_document_version__patent_id=F("patent_id"),
             )
-            .select_related("patent", "target_document_version", "target_claim")
+            .select_related("patent", "target_document_version")
             .order_by("-created_at")
         )
         analyses = filter_visible_matter_queryset(analyses, tenant=tenant, user=request.user, matter_type="analysis")
@@ -101,34 +149,35 @@ class AnalysisListCreateView(APIView):
         values = payload.validated_data
 
         try:
-            patent = Patent.objects.for_tenant(tenant.pk).get(pk=values["patent_id"])
+            # Resolve only the patent identifier first; do not load claim text or
+            # document-version content until the matter ACL has been checked.
+            patent = Patent.objects.for_tenant(tenant.pk).only("pk", "tenant_id").get(pk=values["patent_id"])
+        except Patent.DoesNotExist as exc:
+            raise NotFound("The selected patent was not found.") from exc
+
+        require_matter_access(
+            request=request, matter_type="patent", matter_id=patent.pk, required="EDIT"
+        )
+        patent = Patent.objects.for_tenant(tenant.pk).get(pk=patent.pk)
+
+        try:
             version = (
                 PatentDocumentVersion.objects.for_tenant(tenant.pk)
                 .select_related("patent")
-                .get(
-                    pk=values["document_version_id"],
-                    patent_id=patent.pk,
-                )
+                .get(pk=values["document_version_id"], patent_id=patent.pk)
             )
             claim = (
                 Claim.objects.for_tenant(tenant.pk)
                 .select_related("patent", "document_version")
                 .get(
-                    pk=values["claim_id"],
-                    patent_id=patent.pk,
+                    pk=values["claim_id"], patent_id=patent.pk,
                     document_version_id=version.pk,
                 )
             )
-        except (
-            Patent.DoesNotExist,
-            PatentDocumentVersion.DoesNotExist,
-            Claim.DoesNotExist,
-        ) as exc:
+        except (PatentDocumentVersion.DoesNotExist, Claim.DoesNotExist) as exc:
             raise NotFound(
                 "The selected patent, version, or claim was not found."
             ) from exc
-
-        require_matter_access(request=request, matter_type="patent", matter_id=patent.pk, required="EDIT")
         if (
             patent.tenant_id != tenant.pk
             or version.tenant_id != tenant.pk
@@ -262,20 +311,10 @@ class AnalysisRetryView(APIView):
             raise PermissionDenied("Tenant context missing.")
         try:
             with transaction.atomic():
-                analysis = (
-                    AnalysisReport.objects.for_tenant(tenant.pk)
-                    .select_for_update()
-                    .select_related("patent", "target_document_version", "target_claim")
-                    .get(pk=analysis_id)
+                analysis = _get_authorized_analysis(
+                    request, tenant, analysis_id,
+                    analysis_permission="EDIT", patent_permission="EDIT", lock=True,
                 )
-                if (
-                    analysis.patent.tenant_id != tenant.pk
-                    or analysis.target_document_version.tenant_id != tenant.pk
-                    or analysis.target_document_version.patent_id != analysis.patent_id
-                ):
-                    raise NotFound("Analysis was not found.")
-                require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="EDIT")
-                require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="EDIT")
                 if analysis.status != AnalysisReport.Status.FAILED:
                     return Response(
                         {
@@ -405,25 +444,10 @@ class AnalysisReviewView(APIView):
         if membership.status != TenantMembership.Status.ACTIVE:
             raise PermissionDenied("An active tenant membership is required.")
 
-        try:
-            analysis = (
-                AnalysisReport.objects.for_tenant(tenant.pk)
-                .select_related("patent", "target_document_version", "target_claim")
-                .get(pk=analysis_id)
-            )
-        except AnalysisReport.DoesNotExist as exc:
-            raise NotFound("Analysis was not found.") from exc
-
-        if (
-            analysis.patent.tenant_id != tenant.pk
-            or analysis.target_document_version.tenant_id != tenant.pk
-            or analysis.target_document_version.patent_id != analysis.patent_id
-        ):
-            raise PermissionDenied(
-                "Analysis provenance does not match tenant context."
-            )
-        require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="REVIEW")
-        require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="READ")
+        analysis = _get_authorized_analysis(
+            request, tenant, analysis_id,
+            analysis_permission="REVIEW", patent_permission="READ",
+        )
 
         try:
             with transaction.atomic():
@@ -502,21 +526,12 @@ class AnalysisDetailView(APIView):
         if tenant is None:
             raise PermissionDenied("Tenant context missing.")
 
-        try:
-            analysis = (
-                AnalysisReport.objects.for_tenant(tenant.pk)
-                .select_related("patent", "target_document_version", "target_claim")
-                .get(pk=analysis_id)
-            )
-        except AnalysisReport.DoesNotExist as exc:
-            raise NotFound("Analysis was not found.") from exc
-
-        if (
-            analysis.patent.tenant_id != tenant.pk
-            or analysis.target_document_version.tenant_id != tenant.pk
-            or analysis.target_document_version.patent_id != analysis.patent_id
-        ):
-            raise PermissionDenied("Analysis provenance does not match tenant context.")
+        # The helper checks both grants using IDs before hydrating the patent,
+        # document version, claim text, explanations, or evidence references.
+        analysis = _get_authorized_analysis(
+            request, tenant, analysis_id,
+            analysis_permission="READ", patent_permission="READ",
+        )
 
         assessments = list(
             ClaimAssessment.objects.for_tenant(tenant.pk)
@@ -535,9 +550,6 @@ class AnalysisDetailView(APIView):
                 .first()
             )
         )
-        require_matter_access(request=request, matter_type="analysis", matter_id=analysis.pk, required="READ")
-        require_matter_access(request=request, matter_type="patent", matter_id=analysis.patent_id, required="READ")
-
         if claim is not None and (
             claim.tenant_id != tenant.pk
             or claim.patent_id != analysis.patent_id
