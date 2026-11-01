@@ -45,7 +45,9 @@ class ProductVersion(TenantScopedModel):
         PENDING = "PENDING", "Pending"
         PROCESSING = "PROCESSING", "Processing"
         EXTRACTED = "EXTRACTED", "Extracted"
-        FAILED = "FAILED", "Failed"
+        OCR_REQUIRED = "OCR_REQUIRED", "OCR required"
+        EXTRACTION_FAILED = "EXTRACTION_FAILED", "Extraction failed"
+        FAILED = "FAILED", "Failed (legacy)"
 
     class DecompositionStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -64,7 +66,7 @@ class ProductVersion(TenantScopedModel):
     page_count = models.PositiveIntegerField(null=True, blank=True)
     extracted_text = models.TextField(blank=True, default="")
     extracted_pages = models.JSONField(default=list, blank=True)
-    extraction_status = models.CharField(max_length=12, choices=ExtractionStatus.choices, default=ExtractionStatus.PENDING, db_index=True)
+    extraction_status = models.CharField(max_length=20, choices=ExtractionStatus.choices, default=ExtractionStatus.PENDING, db_index=True)
     decomposition_status = models.CharField(max_length=12, choices=DecompositionStatus.choices, default=DecompositionStatus.PENDING, db_index=True)
     error_code = models.CharField(max_length=80, blank=True, default="")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="fto_product_versions_created")

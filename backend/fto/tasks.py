@@ -5,18 +5,21 @@ import logging
 from pathlib import Path
 
 from celery import shared_task
-from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
 from audit.models import AuditLog
 from fto.models import ProductFeature, ProductVersion
-from fto.services import decompose_product_specification, extract_pdf_pages
+from fto.services import decompose_product_specification
+from indexing.pdf_extraction import (
+    PDFOCRRequiredError, PermanentDocumentError, extract_pdf_pages,
+    read_pdf_storage, verify_pdf_digest,
+)
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, acks_late=True, max_retries=2, default_retry_delay=45)
+@shared_task(bind=True, acks_late=True, max_retries=3)
 def process_product_version(self, version_id: str, tenant_id: str) -> dict[str, str | int]:
     """Extract a spec PDF and create idempotent, source-cited feature candidates.
 
@@ -44,34 +47,46 @@ def process_product_version(self, version_id: str, tenant_id: str) -> dict[str, 
         version.save(update_fields=("extraction_status", "decomposition_status", "error_code"))
 
     try:
-        with default_storage.open(version.storage_key, "rb") as handle:
-            pdf_bytes = handle.read()
-        pages = extract_pdf_pages(pdf_bytes)
-    except ValueError:
-        ProductVersion.objects.filter(pk=version.pk, tenant_id=version.tenant_id).update(
-            extraction_status=ProductVersion.ExtractionStatus.FAILED,
-            decomposition_status=ProductVersion.DecompositionStatus.FAILED,
-            error_code="PDF_TEXT_EXTRACTION_FAILED",
+        pdf_bytes = read_pdf_storage(version.storage_key)
+        verify_pdf_digest(pdf_bytes, version.content_sha256)
+        pages = extract_pdf_pages(pdf_bytes).pages
+    except PermanentDocumentError as exc:
+        ocr_required = isinstance(exc, PDFOCRRequiredError)
+        terminal_status = (
+            ProductVersion.ExtractionStatus.OCR_REQUIRED
+            if ocr_required else ProductVersion.ExtractionStatus.EXTRACTION_FAILED
         )
-        return {"version_id": str(version.pk), "status": "FAILED", "error_code": "PDF_TEXT_EXTRACTION_FAILED"}
+        error_code = "OCR_REQUIRED" if ocr_required else (
+            "PDF_RESOURCE_LIMIT_EXCEEDED" if "limit" in str(exc).lower() else
+            "PDF_INTEGRITY_OR_EXTRACTION_FAILED"
+        )
+        ProductVersion.objects.filter(pk=version.pk, tenant_id=version.tenant_id).update(
+            extraction_status=terminal_status,
+            decomposition_status=ProductVersion.DecompositionStatus.FAILED,
+            error_code=error_code,
+        )
+        logger.warning("FTO PDF permanently rejected (version_id=%s, code=%s).", version.pk, error_code)
+        return {"version_id": str(version.pk), "status": terminal_status, "error_code": error_code}
     except Exception as exc:
-        logger.warning("Product specification read failed (version_id=%s, error_type=%s).", version.pk, type(exc).__name__)
+        logger.exception("Transient FTO document processing failure (version_id=%s).", version.pk)
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc, countdown=45 * (self.request.retries + 1))
+            import random
+            base = min(300, 20 * (2 ** self.request.retries))
+            raise self.retry(exc=exc, countdown=base + random.uniform(0, max(1, base * 0.25)))
         ProductVersion.objects.filter(pk=version.pk, tenant_id=version.tenant_id).update(
             extraction_status=ProductVersion.ExtractionStatus.FAILED,
             decomposition_status=ProductVersion.DecompositionStatus.FAILED,
-            error_code="SOURCE_READ_FAILED",
+            error_code="SOURCE_READ_OR_PROCESSING_FAILED",
         )
-        return {"version_id": str(version.pk), "status": "FAILED", "error_code": "SOURCE_READ_FAILED"}
+        return {"version_id": str(version.pk), "status": "FAILED", "error_code": "SOURCE_READ_OR_PROCESSING_FAILED"}
 
     if not any(page.strip() for page in pages):
         ProductVersion.objects.filter(pk=version.pk, tenant_id=version.tenant_id).update(
-            extraction_status=ProductVersion.ExtractionStatus.FAILED,
+            extraction_status=ProductVersion.ExtractionStatus.EXTRACTION_FAILED,
             decomposition_status=ProductVersion.DecompositionStatus.FAILED,
             page_count=len(pages),
             extracted_pages=pages,
-            error_code="NO_SELECTABLE_TEXT_OCR_REQUIRED",
+            error_code="NO_SEARCHABLE_TEXT_AFTER_OCR",
         )
         return {"version_id": str(version.pk), "status": "FAILED", "error_code": "NO_SELECTABLE_TEXT_OCR_REQUIRED"}
 

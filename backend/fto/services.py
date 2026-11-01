@@ -6,7 +6,6 @@ make legal conclusions, infer that a feature is absent, or determine infringemen
 from __future__ import annotations
 
 import hashlib
-import io
 import logging
 import re
 from dataclasses import dataclass
@@ -40,36 +39,10 @@ _STRUCTURED_PREFIX = re.compile(r"^\s*(?:[-*•▪]|\(?\d{1,3}[.)]|[A-Z][.)])\s+
 
 
 def extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
-    """Extract selectable text using installed PDF libraries, without OCR."""
-    failures: list[Exception] = []
-    blank_pages: list[str] | None = None
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-        pages = [(page.extract_text() or "") for page in reader.pages]
-        if any(page.strip() for page in pages):
-            return pages
-        if pages:
-            blank_pages = pages
-        failures.append(ValueError("pypdf found no selectable text."))
-    except Exception as exc:  # pypdf may reject malformed or encrypted documents
-        failures.append(exc)
+    """Compatibility wrapper around the shared bounded OCR-capable extractor."""
+    from indexing.pdf_extraction import extract_pdf_pages as extract_bounded_pdf_pages
 
-    try:
-        import fitz  # PyMuPDF
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-            pages = [(page.get_text("text") or "") for page in document]
-        if any(page.strip() for page in pages):
-            return pages
-        if pages:
-            blank_pages = pages
-        failures.append(ValueError("PyMuPDF found no selectable text."))
-    except Exception as exc:
-        failures.append(exc)
-
-    if blank_pages is not None:
-        return blank_pages
-    raise ValueError("The PDF could not be opened for text extraction.") from (failures[-1] if failures else None)
+    return extract_bounded_pdf_pages(pdf_bytes).pages
 
 
 def _candidate_spans(page_text: str) -> Iterable[tuple[int, int, str]]:
