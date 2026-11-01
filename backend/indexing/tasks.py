@@ -3,21 +3,33 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
-import io
 import logging
 import re
+import random
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from celery import Task, shared_task
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.db.models import F
+from django.utils import timezone
 
 from audit.models import AuditLog
 from indexing.models import TextChunk
+from indexing.pdf_extraction import (
+    PDFExtractionError,
+    PDFResourceLimitError,
+    PermanentDocumentError,
+    extract_pdf_pages,
+    read_pdf_storage,
+    validate_pdf_structure,
+    verify_pdf_digest,
+)
 from indexing.language import detect_language_code
 from indexing.services import BGEEmbedder, HybridChunker
 from patents.models import Claim, Patent, PatentDocumentVersion, Schematic
@@ -93,58 +105,8 @@ def _record_task_failure(
 
 
 def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
-    """Extract selectable text by page, preferring pypdf and falling back to fitz."""
-    extraction_errors: list[Exception] = []
-    blank_pages: list[str] | None = None
-
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        extraction_errors.append(exc)
-    else:
-        try:
-            reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-            pages = [page.extract_text() or "" for page in reader.pages]
-            if any(page.strip() for page in pages):
-                return pages
-            blank_pages = pages
-            extraction_errors.append(
-                ValueError("pypdf found no selectable text in the PDF.")
-            )
-        except Exception as exc:
-            extraction_errors.append(exc)
-
-    try:
-        import fitz
-    except ImportError as exc:
-        extraction_errors.append(exc)
-    else:
-        try:
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-                pages = [page.get_text("text") or "" for page in document]
-            if any(page.strip() for page in pages):
-                return pages
-            if pages:
-                blank_pages = pages
-            extraction_errors.append(
-                ValueError("PyMuPDF found no selectable text in the PDF.")
-            )
-        except Exception as exc:
-            extraction_errors.append(exc)
-
-    # Scanned PDFs may legitimately have no text layer. Claims and metadata can
-    # still be chunked, while OCR remains a separate ingestion responsibility.
-    if blank_pages is not None:
-        return blank_pages
-    if extraction_errors and all(
-        isinstance(error, ImportError) for error in extraction_errors
-    ):
-        raise RuntimeError(
-            "PDF text extraction requires pypdf or PyMuPDF in the worker image."
-        ) from extraction_errors[-1]
-    raise RuntimeError("Unable to open or extract text from the patent PDF.") from (
-        extraction_errors[-1] if extraction_errors else None
-    )
+    """Compatibility wrapper over the shared OCR-aware bounded extractor."""
+    return extract_pdf_pages(pdf_bytes).pages
 
 
 def _join_pages(pages: list[str]) -> tuple[str, tuple[_PageSpan, ...]]:
@@ -203,26 +165,49 @@ def _page_range_for_span(
     return matching_pages[0], matching_pages[-1]
 
 
-def _build_text_chunk_records(
+def _iter_text_chunk_records(
     document_version: PatentDocumentVersion,
     raw_text: str,
     page_spans: tuple[_PageSpan, ...],
-) -> list[TextChunk]:
-    """Chunk abstract, specification, and extracted claims for one version."""
+):
+    """Yield chunk rows lazily without materializing every claim in memory."""
     patent = document_version.patent
-    sources: list[_ChunkSource] = []
+
+    def emit_source(source: _ChunkSource):
+        for chunk in HybridChunker.iter_chunks(source.text):
+            char_start = chunk["char_start"] + source.source_char_offset
+            char_end = chunk["char_end"] + source.source_char_offset
+            page_start: int | None = source.source_page_index
+            page_end: int | None = source.source_page_index
+            if source.page_spans:
+                page_start, page_end = _page_range_for_span(
+                    char_start, char_end, source.page_spans
+                )
+            yield TextChunk(
+                tenant_id=document_version.tenant_id,
+                patent_id=patent.pk,
+                document_version_id=document_version.pk,
+                section_type=source.section_type,
+                claim_number=source.claim_number,
+                text=chunk["text"],
+                language_code=detect_language_code(chunk["text"]),
+                page_start=page_start,
+                page_end=page_end,
+                char_start=char_start,
+                char_end=char_end,
+            )
 
     if patent.abstract and patent.abstract.strip():
-        sources.append(
+        yield from emit_source(
             _ChunkSource(
                 section_type=TextChunk.SectionType.ABSTRACT,
-                text=patent.abstract.strip(),
+                text=patent.abstract.strip()[:5_000_000],
             )
         )
 
     specification = _specification_source(raw_text, page_spans)
     if specification is not None:
-        sources.append(specification)
+        yield from emit_source(specification)
 
     claims = (
         Claim.objects.for_tenant(document_version.tenant_id)
@@ -232,140 +217,207 @@ def _build_text_chunk_records(
         )
         .order_by("claim_number", "pk")
     )
-    for claim in claims.iterator(chunk_size=500):
-        if not claim.claim_text.strip():
-            continue
-        sources.append(
-            _ChunkSource(
-                section_type=TextChunk.SectionType.CLAIM,
-                text=claim.claim_text,
-                claim_number=claim.claim_number,
-                source_page_index=claim.source_page_index,
-            )
-        )
-
-    records: list[TextChunk] = []
-    for source in sources:
-        for chunk in HybridChunker.chunk_text(source.text):
-            char_start = chunk["char_start"] + source.source_char_offset
-            char_end = chunk["char_end"] + source.source_char_offset
-
-            page_start: int | None = source.source_page_index
-            page_end: int | None = source.source_page_index
-            if source.page_spans:
-                page_start, page_end = _page_range_for_span(
-                    char_start,
-                    char_end,
-                    source.page_spans,
-                )
-
-            records.append(
-                TextChunk(
-                    tenant_id=document_version.tenant_id,
-                    patent_id=patent.pk,
-                    document_version_id=document_version.pk,
-                    section_type=source.section_type,
-                    claim_number=source.claim_number,
-                    text=chunk["text"],
-                    language_code=detect_language_code(chunk["text"]),
-                    page_start=page_start,
-                    page_end=page_end,
-                    char_start=char_start,
-                    char_end=char_end,
+    for claim in claims.iterator(chunk_size=100):
+        if claim.claim_text and claim.claim_text.strip():
+            yield from emit_source(
+                _ChunkSource(
+                    section_type=TextChunk.SectionType.CLAIM,
+                    text=claim.claim_text[:5_000_000],
+                    claim_number=claim.claim_number,
+                    source_page_index=claim.source_page_index,
                 )
             )
-    return records
 
 
-@shared_task(bind=True, queue="embedding", max_retries=3)
+def _build_text_chunk_records(
+    document_version: PatentDocumentVersion,
+    raw_text: str,
+    page_spans: tuple[_PageSpan, ...],
+) -> list[TextChunk]:
+    """Compatibility wrapper for tests and small internal callers."""
+    return list(_iter_text_chunk_records(document_version, raw_text, page_spans))
+
+
+def _retry_countdown(retries: int) -> float:
+    ceiling = min(300.0, 2.0 ** min(max(retries, 0), 8))
+    return random.uniform(0.5, max(0.5, ceiling))
+
+
+def _set_text_stage_failure(
+    document_version: PatentDocumentVersion,
+    error: Exception,
+    *,
+    terminal: bool,
+) -> None:
+    PatentDocumentVersion.objects.filter(
+        pk=document_version.pk, tenant_id=document_version.tenant_id
+    ).update(
+        text_indexing_status=(
+            PatentDocumentVersion.StageStatus.FAILED
+            if terminal else PatentDocumentVersion.StageStatus.PENDING
+        ),
+        text_indexing_error_code=type(error).__name__[:64],
+        **({"text_indexing_task_id": "", "text_indexing_started_at": None} if terminal else {"text_indexing_started_at": None}),
+    )
+    if terminal:
+        Patent.objects.filter(
+            pk=document_version.patent_id, tenant_id=document_version.tenant_id
+        ).update(status=Patent.Status.FAILED)
+
+
+@shared_task(
+    bind=True,
+    queue="embedding",
+    max_retries=5,
+    soft_time_limit=960,
+    time_limit=990,
+    acks_late=True,
+)
 def generate_document_embeddings(
     self: Task,
     document_version_id: str,
 ) -> dict[str, str | int]:
-    """Create atomic tenant-scoped text chunks with BGE-M3 embeddings."""
+    """Build bounded inactive chunk generations and atomically activate on success."""
     document_version: PatentDocumentVersion | None = None
+    generation_id = uuid.uuid4()
+    total_chunks = 0
+    staged_batch_size = max(1, min(64, int(getattr(settings, "PATENTSHIELD_TEXT_EMBEDDING_BATCH_SIZE", 32))))
 
     try:
-        document_version = (
-            PatentDocumentVersion.objects.select_related("patent")
-            .get(pk=document_version_id)
-        )
-        if document_version.patent.tenant_id != document_version.tenant_id:
-            raise ValueError(
-                "Patent and document version must belong to the same tenant."
-            )
-
-        with default_storage.open(document_version.storage_key, "rb") as file_obj:
-            pdf_bytes = file_obj.read()
-        if not pdf_bytes:
-            raise ValueError("The stored patent document is empty.")
-
-        calculated_digest = hashlib.sha256(pdf_bytes).hexdigest()
-        expected_digest = document_version.content_sha256.strip().lower()
-        if not hmac.compare_digest(calculated_digest, expected_digest):
-            raise ValueError(
-                "Stored document SHA-256 does not match its metadata."
-            )
-
-        pages = _extract_pdf_pages(pdf_bytes)
-        raw_text, page_spans = _join_pages(pages)
-        records = _build_text_chunk_records(
-            document_version,
-            raw_text,
-            page_spans,
-        )
-        embeddings = BGEEmbedder.embed_texts([record.text for record in records])
-        if len(embeddings) != len(records):
-            raise RuntimeError("Embedding count does not match the chunk count.")
-
-        for record, embedding in zip(records, embeddings, strict=True):
-            if len(embedding) != 1024:
-                raise RuntimeError(
-                    "An embedding has an invalid dimension; expected 1024."
-                )
-            record.embedding = embedding
-
-        # Replacing all rows for this version is atomic, so a retry cannot leave
-        # a mixture of old and newly generated chunk sets.
+        task_id = str(self.request.id or "")
         with transaction.atomic():
+            document_version = (
+                PatentDocumentVersion.objects.select_for_update()
+                .select_related("patent")
+                .get(pk=document_version_id)
+            )
+            reserved_task_id = document_version.text_indexing_task_id
+            if reserved_task_id and reserved_task_id != task_id:
+                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "another_text_task_is_reserved"}
+            if document_version.text_indexing_status == PatentDocumentVersion.StageStatus.INDEXED:
+                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "text_stage_already_indexed"}
+            if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+                raise PDFExtractionError("Document text extraction must complete before vector indexing.")
+            document_version.text_indexing_task_id = task_id
+            document_version.text_indexing_status = PatentDocumentVersion.StageStatus.PROCESSING
+            document_version.text_indexing_attempts = F("text_indexing_attempts") + 1
+            document_version.text_indexing_error_code = ""
+            document_version.text_indexing_started_at = timezone.now()
+            document_version.save(update_fields=(
+                "text_indexing_task_id", "text_indexing_status",
+                "text_indexing_attempts", "text_indexing_error_code",
+                "text_indexing_started_at",
+            ))
+        if document_version.patent.tenant_id != document_version.tenant_id:
+            raise PDFExtractionError("Patent and document version tenant ownership do not match.")
+        if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+            raise PDFExtractionError("Document text extraction must complete before vector indexing.")
+
+        # Staging chunks left by a hard-killed previous delivery are always
+        # inactive and safe to remove before rebuilding this generation.
+        TextChunk.objects.for_tenant(document_version.tenant_id).filter(
+            document_version_id=document_version.pk, is_active=False,
+        ).delete()
+
+        pdf_bytes = read_pdf_storage(document_version.storage_key)
+        verify_pdf_digest(pdf_bytes, document_version.content_sha256)
+        extracted = extract_pdf_pages(pdf_bytes)
+        raw_text, page_spans = _join_pages(extracted.pages)
+        if not raw_text.strip():
+            raise PDFExtractionError("No searchable text is available for vector indexing.")
+
+        model_name, model_revision = BGEEmbedder.model_identity()
+        batch: list[TextChunk] = []
+
+        def flush_batch() -> None:
+            nonlocal total_chunks, batch
+            if not batch:
+                return
+            embeddings = BGEEmbedder.embed_texts([record.text for record in batch])
+            if len(embeddings) != len(batch):
+                raise RuntimeError("Embedding count does not match the chunk batch.")
+            for record, embedding in zip(batch, embeddings, strict=True):
+                if len(embedding) != BGEEmbedder.DIMENSIONS:
+                    raise PermanentDocumentError("Embedding dimension mismatch; refusing to store vectors.")
+                record.embedding = embedding
+                record.embedding_model = model_name
+                record.embedding_revision = model_revision
+                record.index_generation = generation_id
+                record.is_active = False
+            # Persist each small batch as inactive staging rows. The previous
+            # generation remains queryable until the final activation transaction.
+            TextChunk.objects.bulk_create(batch, batch_size=staged_batch_size)
+            total_chunks += len(batch)
+            logger.info(
+                "Staged %s chunks for document version %s (generation=%s).",
+                total_chunks, document_version.pk, generation_id,
+            )
+            batch = []
+
+        for record in _iter_text_chunk_records(document_version, raw_text, page_spans):
+            batch.append(record)
+            if len(batch) >= staged_batch_size:
+                flush_batch()
+        flush_batch()
+        if total_chunks < 1:
+            raise PDFExtractionError("Zero searchable text chunks were extracted; document cannot be indexed.")
+
+        with transaction.atomic():
+            locked_version = PatentDocumentVersion.objects.select_for_update().get(
+                pk=document_version.pk, tenant_id=document_version.tenant_id
+            )
             TextChunk.objects.for_tenant(document_version.tenant_id).filter(
                 document_version_id=document_version.pk,
                 patent_id=document_version.patent_id,
-            ).delete()
-            TextChunk.objects.bulk_create(records, batch_size=256)
+            ).exclude(index_generation=generation_id).update(is_active=False)
+            TextChunk.objects.for_tenant(document_version.tenant_id).filter(
+                index_generation=generation_id,
+                document_version_id=document_version.pk,
+            ).update(is_active=True)
+            PatentDocumentVersion.objects.filter(pk=locked_version.pk).update(
+                text_indexing_status=PatentDocumentVersion.StageStatus.INDEXED,
+                text_indexing_error_code="",
+                text_indexing_task_id="",
+                text_indexing_started_at=None,
+            )
             Patent.objects.filter(
-                pk=document_version.patent_id,
-                tenant_id=document_version.tenant_id,
+                pk=document_version.patent_id, tenant_id=document_version.tenant_id
             ).update(status=Patent.Status.INDEXED)
 
         logger.info(
-            "Indexed document version %s with %d text chunks.",
-            document_version.pk,
-            len(records),
+            "Activated %s text chunks for document version %s (generation=%s).",
+            total_chunks, document_version.pk, generation_id,
         )
         return {
             "document_version_id": str(document_version.pk),
-            "chunks_created": len(records),
-            "embedding_dimensions": 1024,
+            "chunks_created": total_chunks,
+            "embedding_dimensions": BGEEmbedder.DIMENSIONS,
+            "index_generation": str(generation_id),
         }
 
     except Exception as exc:
         logger.exception(
-            "Embedding generation failed for document version %s.",
-            document_version_id,
+            "Embedding generation failed for document version %s (task=%s, retry=%s).",
+            document_version_id, self.request.id, self.request.retries,
         )
         if document_version is not None:
-            Patent.objects.filter(
-                pk=document_version.patent_id,
-                tenant_id=document_version.tenant_id,
-            ).update(status=Patent.Status.FAILED)
+            # An incomplete generation is never visible to retrieval. Remove its
+            # staged rows so retries do not grow the tenant's vector table.
+            try:
+                TextChunk.objects.for_tenant(document_version.tenant_id).filter(
+                    index_generation=generation_id,
+                    document_version_id=document_version.pk,
+                ).delete()
+            except Exception:
+                logger.exception("Could not clean up inactive chunk generation %s.", generation_id)
+            terminal = isinstance(exc, PermanentDocumentError) or self.request.retries >= self.max_retries
+            _set_text_stage_failure(document_version, exc, terminal=terminal)
             _record_task_failure(
-                document_version,
-                self,
-                exc,
-                action="GENERATE_DOCUMENT_EMBEDDINGS",
+                document_version, self, exc, action="GENERATE_DOCUMENT_EMBEDDINGS"
             )
-        raise self.retry(exc=exc, countdown=60)
+        if isinstance(exc, PermanentDocumentError) or self.request.retries >= self.max_retries:
+            raise
+        raise self.retry(exc=exc, countdown=_retry_countdown(self.request.retries))
 
 
 def _clamp_rect(rect: RectTuple, page_rect: Any) -> RectTuple | None:
@@ -566,17 +618,28 @@ def _store_figure_png(
     created_storage_keys: set[str],
     old_storage_keys: set[str],
 ) -> str:
-    """Render a clipped figure as PNG and store it in Django default storage."""
+    """Render one bounded crop, enforcing pixel and output-byte limits."""
     clip = fitz.Rect(*rect)
+    width_points = max(1.0, float(clip.width))
+    height_points = max(1.0, float(clip.height))
+    max_pixels = int(getattr(settings, "PATENTSHIELD_PDF_SCHEMATIC_MAX_PIXELS", 12_000_000))
+    scale = min(2.0, (max_pixels / (width_points * height_points)) ** 0.5 * 0.95)
+    if not math.isfinite(scale) or scale <= 0:
+        raise PDFResourceLimitError("Schematic geometry cannot be rendered within the pixel budget.")
     pixmap = page.get_pixmap(
-        matrix=fitz.Matrix(2.0, 2.0),
+        matrix=fitz.Matrix(scale, scale),
         clip=clip,
         alpha=False,
         annots=False,
     )
+    if pixmap.width * pixmap.height > max_pixels:
+        raise PDFResourceLimitError("Schematic render exceeded the configured pixel limit.")
     png_bytes = pixmap.tobytes("png")
     if not png_bytes:
-        raise RuntimeError(f"PyMuPDF produced an empty PNG for {figure_number}.")
+        raise PDFExtractionError(f"PyMuPDF produced an empty PNG for {figure_number}.")
+    max_bytes = int(getattr(settings, "PATENTSHIELD_PDF_SCHEMATIC_MAX_BYTES", 20 * 1024 * 1024))
+    if len(png_bytes) > max_bytes:
+        raise PDFResourceLimitError("Schematic PNG exceeded the configured output-byte limit.")
 
     digest = hashlib.sha256(png_bytes).hexdigest()[:16]
     requested_key = (
@@ -585,6 +648,8 @@ def _store_figure_png(
         f"{figure_number.lower()}-{digest}.png"
     )
     if default_storage.exists(requested_key):
+        if requested_key not in old_storage_keys:
+            created_storage_keys.add(requested_key)
         return requested_key
 
     stored_key = default_storage.save(
@@ -596,38 +661,77 @@ def _store_figure_png(
     return stored_key
 
 
-@shared_task(bind=True, queue="ingestion", max_retries=3)
+def _set_schematic_stage_failure(
+    document_version: PatentDocumentVersion,
+    error: Exception,
+    *,
+    terminal: bool,
+) -> None:
+    PatentDocumentVersion.objects.filter(
+        pk=document_version.pk, tenant_id=document_version.tenant_id
+    ).update(
+        schematic_indexing_status=(
+            PatentDocumentVersion.StageStatus.FAILED
+            if terminal else PatentDocumentVersion.StageStatus.PENDING
+        ),
+        schematic_indexing_error_code=type(error).__name__[:64],
+        **({"schematic_indexing_task_id": "", "schematic_indexing_started_at": None} if terminal else {"schematic_indexing_started_at": None}),
+    )
+
+
+@shared_task(
+    bind=True,
+    queue="ingestion",
+    max_retries=5,
+    soft_time_limit=900,
+    time_limit=930,
+    acks_late=True,
+)
 def extract_and_index_schematics(
     self: Task,
     document_version_id: str,
 ) -> dict[str, str | int]:
-    """Crop embedded images and vector drawing regions from a patent PDF."""
+    """Index at most the configured schematic count under bounded PDF limits."""
     document_version: PatentDocumentVersion | None = None
     created_storage_keys: set[str] = set()
     old_storage_keys: set[str] = set()
+    stage_started = time.monotonic()
 
     try:
         import fitz
 
-        document_version = (
-            PatentDocumentVersion.objects.select_related("patent")
-            .get(pk=document_version_id)
-        )
+        task_id = str(self.request.id or "")
+        with transaction.atomic():
+            document_version = (
+                PatentDocumentVersion.objects.select_for_update()
+                .select_related("patent")
+                .get(pk=document_version_id)
+            )
+            reserved_task_id = document_version.schematic_indexing_task_id
+            if reserved_task_id and reserved_task_id != task_id:
+                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "another_schematic_task_is_reserved"}
+            if document_version.schematic_indexing_status == PatentDocumentVersion.StageStatus.INDEXED:
+                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "schematic_stage_already_indexed"}
+            if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+                raise PDFExtractionError("Document extraction must complete before schematic indexing.")
+            document_version.schematic_indexing_task_id = task_id
+            document_version.schematic_indexing_status = PatentDocumentVersion.StageStatus.PROCESSING
+            document_version.schematic_indexing_attempts = F("schematic_indexing_attempts") + 1
+            document_version.schematic_indexing_error_code = ""
+            document_version.schematic_indexing_started_at = timezone.now()
+            document_version.save(update_fields=(
+                "schematic_indexing_task_id", "schematic_indexing_status",
+                "schematic_indexing_attempts", "schematic_indexing_error_code",
+                "schematic_indexing_started_at",
+            ))
         if document_version.patent.tenant_id != document_version.tenant_id:
-            raise ValueError(
-                "Patent and document version must belong to the same tenant."
-            )
+            raise PDFExtractionError("Patent and document version tenant ownership do not match.")
+        if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+            raise PDFExtractionError("Document extraction must complete before schematic indexing.")
 
-        with default_storage.open(document_version.storage_key, "rb") as file_obj:
-            pdf_bytes = file_obj.read()
-        if not pdf_bytes:
-            raise ValueError("The stored patent document is empty.")
-        actual_digest = hashlib.sha256(pdf_bytes).hexdigest()
-        expected_digest = document_version.content_sha256.strip().lower()
-        if not hmac.compare_digest(actual_digest, expected_digest):
-            raise ValueError(
-                "Stored document SHA-256 does not match its metadata."
-            )
+        pdf_bytes = read_pdf_storage(document_version.storage_key)
+        verify_pdf_digest(pdf_bytes, document_version.content_sha256)
+        validate_pdf_structure(pdf_bytes)
 
         existing_rows = list(
             Schematic.objects.for_tenant(document_version.tenant_id)
@@ -636,18 +740,30 @@ def extract_and_index_schematics(
         )
         old_storage_keys = set(existing_rows)
         new_records: list[Schematic] = []
+        max_schematics = int(getattr(settings, "PATENTSHIELD_PDF_MAX_SCHEMATICS", 200))
+        total_timeout = int(getattr(settings, "PATENTSHIELD_PDF_SCHEMATIC_TIMEOUT_SECONDS", 600))
         visual_index_version = f"pymupdf-{getattr(fitz, 'VersionBind', 'unknown')}"
 
         with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf_document:
-            for page_index, page in enumerate(pdf_document):
+            if pdf_document.needs_pass:
+                raise PDFExtractionError("Password-protected PDFs are not supported.")
+            if pdf_document.page_count > int(getattr(settings, "PATENTSHIELD_PDF_MAX_PAGES", 2_000)):
+                raise PDFResourceLimitError("PDF page count exceeds the schematic worker limit.")
+            for page_index in range(pdf_document.page_count):
+                if time.monotonic() - stage_started > total_timeout:
+                    raise PDFResourceLimitError("Schematic extraction exceeded its total time budget.")
+                page = pdf_document.load_page(page_index)
                 page_rect = page.rect
                 candidates = _figure_candidates(page, fitz)
                 for candidate_index, candidate in enumerate(candidates, start=1):
+                    if len(new_records) >= max_schematics:
+                        break
+                    if time.monotonic() - stage_started > total_timeout:
+                        raise PDFResourceLimitError("Schematic extraction exceeded its total time budget.")
                     figure_number = f"P{page_index + 1}-F{candidate_index}"
                     rect = _clamp_rect(candidate.rect, page_rect)
                     if rect is None:
                         continue
-
                     stored_key = _store_figure_png(
                         page,
                         fitz,
@@ -672,14 +788,28 @@ def extract_and_index_schematics(
                             visual_index_version=visual_index_version,
                         )
                     )
+                if len(new_records) >= max_schematics:
+                    logger.warning(
+                        "Schematic cap reached for document version %s (limit=%s).",
+                        document_version.pk, max_schematics,
+                    )
+                    break
 
-        # Replacing the current version's schematic set is atomic. Cropped
-        # files are written first so database rows never point to missing files.
+        # A zero-figure patent is a successful schematic stage; text indexing
+        # determines whether the document itself is searchable/indexed.
         with transaction.atomic():
             Schematic.objects.for_tenant(document_version.tenant_id).filter(
                 document_version_id=document_version.pk
             ).delete()
-            Schematic.objects.bulk_create(new_records, batch_size=100)
+            Schematic.objects.bulk_create(new_records, batch_size=32)
+            PatentDocumentVersion.objects.filter(
+                pk=document_version.pk, tenant_id=document_version.tenant_id
+            ).update(
+                schematic_indexing_status=PatentDocumentVersion.StageStatus.INDEXED,
+                schematic_indexing_error_code="",
+                schematic_indexing_task_id="",
+                schematic_indexing_started_at=None,
+            )
 
         new_storage_keys = {record.image_storage_key for record in new_records}
         for old_key in old_storage_keys - new_storage_keys:
@@ -687,43 +817,36 @@ def extract_and_index_schematics(
                 if not Schematic.objects.filter(image_storage_key=old_key).exists():
                     default_storage.delete(old_key)
             except Exception:
-                logger.exception(
-                    "Could not clean up obsolete schematic file %s.", old_key
-                )
+                logger.exception("Could not clean up obsolete schematic file %s.", old_key)
 
         logger.info(
             "Indexed %d schematic region(s) for document version %s.",
-            len(new_records),
-            document_version.pk,
+            len(new_records), document_version.pk,
         )
         return {
             "document_version_id": str(document_version.pk),
             "schematics_created": len(new_records),
+            "schematic_indexing_status": PatentDocumentVersion.StageStatus.INDEXED,
         }
 
     except Exception as exc:
         logger.exception(
-            "Schematic extraction failed for document version %s.",
-            document_version_id,
+            "Schematic extraction failed for version %s (task=%s, retry=%s).",
+            document_version_id, self.request.id, self.request.retries,
         )
-        # Remove files created by this failed attempt unless they were already
-        # referenced by prior rows. Cleanup failures do not mask task failure.
         for storage_key in created_storage_keys - old_storage_keys:
             try:
-                if not Schematic.objects.filter(
-                    image_storage_key=storage_key
-                ).exists():
+                if not Schematic.objects.filter(image_storage_key=storage_key).exists():
                     default_storage.delete(storage_key)
             except Exception:
-                logger.exception(
-                    "Could not clean up failed schematic file %s.", storage_key
-                )
+                logger.exception("Could not clean up failed schematic file %s.", storage_key)
 
         if document_version is not None:
+            terminal = isinstance(exc, PermanentDocumentError) or self.request.retries >= self.max_retries
+            _set_schematic_stage_failure(document_version, exc, terminal=terminal)
             _record_task_failure(
-                document_version,
-                self,
-                exc,
-                action="EXTRACT_AND_INDEX_SCHEMATICS",
+                document_version, self, exc, action="EXTRACT_AND_INDEX_SCHEMATICS"
             )
-        raise self.retry(exc=exc, countdown=60)
+        if isinstance(exc, PermanentDocumentError) or self.request.retries >= self.max_retries:
+            raise
+        raise self.retry(exc=exc, countdown=_retry_countdown(self.request.retries))

@@ -45,6 +45,11 @@ class TextChunk(TenantScopedModel):
     char_start = models.IntegerField(null=True, blank=True)
     char_end = models.IntegerField(null=True, blank=True)
     embedding = VectorField(dimensions=1024, null=True, blank=True)
+    embedding_model = models.CharField(max_length=200, blank=True, default="")
+    embedding_revision = models.CharField(max_length=100, blank=True, default="")
+    # New chunk generations are staged inactive and flipped active atomically.
+    index_generation = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -72,6 +77,7 @@ class TextChunk(TenantScopedModel):
                     "claim_number",
                     "char_start",
                     "char_end",
+                    "index_generation",
                 ),
                 name="chunk_source_range_uniq",
             ),

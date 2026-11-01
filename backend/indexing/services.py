@@ -49,61 +49,63 @@ class HybridChunker:
     """
 
     @staticmethod
-    def chunk_text(
+    def iter_chunks(
         text: str,
         max_tokens: int = 512,
         overlap: int = 64,
-    ) -> list[ChunkData]:
-        """Split text into overlapping windows with half-open offsets.
-
-        Args:
-            text: Source text to split.
-            max_tokens: Maximum chunk units: whitespace tokens for ordinary text,
-                visible Unicode characters for CJK-dominant text.
-            overlap: Number of units repeated between adjacent chunks.
-
-        Returns:
-            Chunks containing the exact source substring and its offsets.
-
-        Raises:
-            ValueError: If the chunk size or overlap is invalid.
-        """
+    ):
+        """Yield bounded overlapping windows without materializing all tokens."""
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1.")
         if overlap < 0 or overlap >= max_tokens:
             raise ValueError("overlap must be >= 0 and less than max_tokens.")
         if not text or not text.strip():
-            return []
+            return
 
-        if has_substantial_cjk(text):
-            # CJK patents commonly omit spaces between words. Character windows
-            # keep those documents bounded for embedding and selected translation.
-            tokens = list(re.finditer(r"\S", text, flags=re.UNICODE))
-        else:
-            tokens = list(_TOKEN_PATTERN.finditer(text))
-        if not tokens:
-            return []
+        token_iterator = iter(
+            re.finditer(r"\S", text, flags=re.UNICODE)
+            if has_substantial_cjk(text)
+            else _TOKEN_PATTERN.finditer(text)
+        )
+        window = []
+        for _ in range(max_tokens):
+            try:
+                window.append(next(token_iterator))
+            except StopIteration:
+                break
 
         step = max_tokens - overlap
-        chunks: list[ChunkData] = []
-        token_start = 0
-
-        while token_start < len(tokens):
-            token_end = min(token_start + max_tokens, len(tokens))
-            char_start = tokens[token_start].start()
-            char_end = tokens[token_end - 1].end()
-            chunks.append(
-                {
-                    "text": text[char_start:char_end],
-                    "char_start": char_start,
-                    "char_end": char_end,
-                }
-            )
-            if token_end == len(tokens):
+        while window:
+            char_start = window[0].start()
+            char_end = window[-1].end()
+            yield {
+                "text": text[char_start:char_end],
+                "char_start": char_start,
+                "char_end": char_end,
+            }
+            if len(window) < max_tokens:
                 break
-            token_start += step
 
-        return chunks
+            next_window = window[-overlap:] if overlap else []
+            added = 0
+            while len(next_window) < max_tokens:
+                try:
+                    next_window.append(next(token_iterator))
+                    added += 1
+                except StopIteration:
+                    break
+            if not added:
+                break
+            window = next_window
+
+    @staticmethod
+    def chunk_text(
+        text: str,
+        max_tokens: int = 512,
+        overlap: int = 64,
+    ) -> list[ChunkData]:
+        """Compatibility wrapper that collects chunks from :meth:`iter_chunks`."""
+        return list(HybridChunker.iter_chunks(text, max_tokens=max_tokens, overlap=overlap))
 
 
 class BGEEmbedder:
@@ -122,6 +124,13 @@ class BGEEmbedder:
     _load_attempted = False
     _load_error: Exception | None = None
     _model_lock = threading.Lock()
+
+    @classmethod
+    def model_identity(cls) -> tuple[str, str]:
+        return (
+            str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME)),
+            str(getattr(settings, "BGE_MODEL_REVISION", "main")),
+        )
 
     @classmethod
     def embed_texts(cls, texts: list[str]) -> list[list[float]]:
@@ -172,7 +181,10 @@ class BGEEmbedder:
                     f"Expected {cls.DIMENSIONS}-dimensional BGE vectors, "
                     f"received {len(vector)} dimensions."
                 )
-            normalized_vectors.append([float(value) for value in vector])
+            normalized = [float(value) for value in vector]
+            if any(not math.isfinite(value) for value in normalized):
+                raise RuntimeError("BGE-M3 returned a non-finite vector component.")
+            normalized_vectors.append(normalized)
         return normalized_vectors
 
     @classmethod
@@ -191,13 +203,13 @@ class BGEEmbedder:
             try:
                 from sentence_transformers import SentenceTransformer
 
-                model_name = str(
-                    getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME)
-                )
+                model_name = str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME))
+                revision = str(getattr(settings, "BGE_MODEL_REVISION", "main"))
                 device = os.getenv("BGE_DEVICE") or None
                 cls._model = SentenceTransformer(
                     model_name,
                     device=device,
+                    revision=revision,
                     local_files_only=True,
                     trust_remote_code=False,
                 )
