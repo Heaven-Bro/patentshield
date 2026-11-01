@@ -119,3 +119,50 @@ class TenantScopedModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class TenantExternalAIProcessingPolicy(models.Model):
+    """Explicit, tenant-approved categories that may leave the workspace."""
+
+    tenant = models.OneToOneField(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="external_ai_policy",
+    )
+    enabled = models.BooleanField(default=False)
+    provider = models.CharField(max_length=40, default="meta")
+    model_name = models.CharField(max_length=120, blank=True, default="")
+    region = models.CharField(max_length=80, blank=True, default="")
+    policy_version = models.CharField(max_length=40, default="1")
+    allowed_data_categories = models.JSONField(default=list, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_tenant_ai_policies",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "tenant external AI processing policy"
+        verbose_name_plural = "tenant external AI processing policies"
+
+    def allows(self, categories: set[str], *, provider: str, model_name: str) -> bool:
+        configured = {
+            str(value).strip()
+            for value in (self.allowed_data_categories or [])
+            if isinstance(value, str) and value.strip()
+        }
+        return bool(
+            self.enabled
+            and self.approved_at
+            and self.approved_by_id
+            and self.provider == provider
+            and self.model_name == model_name
+            and categories.issubset(configured)
+        )
+
+    def __str__(self) -> str:
+        return f"External AI policy for {self.tenant} (v{self.policy_version})"

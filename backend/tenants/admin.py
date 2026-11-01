@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from tenants.models import Tenant, TenantMembership
+from tenants.models import Tenant, TenantMembership, TenantExternalAIProcessingPolicy
 
 
 @admin.register(Tenant)
@@ -32,3 +32,14 @@ class TenantMembershipAdmin(admin.ModelAdmin):
     )
     autocomplete_fields = ("user", "tenant")
     list_select_related = ("user", "tenant")
+
+
+@admin.register(TenantExternalAIProcessingPolicy)
+class TenantExternalAIProcessingPolicyAdmin(admin.ModelAdmin):
+    """Explicitly approve per-tenant outbound AI/translation data categories."""
+
+    list_display = ("tenant", "enabled", "provider", "model_name", "policy_version", "approved_by", "approved_at")
+    list_filter = ("enabled", "provider", "region")
+    search_fields = ("tenant__name", "tenant__slug", "model_name", "provider")
+    autocomplete_fields = ("tenant", "approved_by")
+    readonly_fields = ("updated_at",)
