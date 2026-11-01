@@ -2,6 +2,12 @@
 
 from django.urls import path
 
+from patents.ai_views import (
+    InfringementRiskAnalysisView,
+    LandscapeSummaryView,
+    PatentRAGChatView,
+    SemanticPatentSearchView,
+)
 from patents.intelligence_views import LivePatentSearchView
 
 from patents.surveillance_views import (
@@ -27,6 +33,7 @@ from patents.views import (
     PatentListView,
     PatentVersionFileView,
     PatentVersionProcessView,
+    PatentVersionIndexStageRetryView,
 )
 
 app_name = "patents"
@@ -35,6 +42,10 @@ urlpatterns = [
     path("", PatentListView.as_view(), name="patent-list"),
     path("upload/", PatentDocumentUploadView.as_view(), name="patent-upload"),
     path("search-live/", LivePatentSearchView.as_view(), name="patent-search-live"),
+    path("semantic-search/", SemanticPatentSearchView.as_view(), name="patent-semantic-search"),
+    path("ai/landscape-summary/", LandscapeSummaryView.as_view(), name="patent-ai-landscape-summary"),
+    path("ai/infringement-risk/", InfringementRiskAnalysisView.as_view(), name="patent-ai-infringement-risk"),
+    path("ai/chat/", PatentRAGChatView.as_view(), name="patent-ai-rag-chat"),
     path("surveillance/watchlists/", SurveillanceWatchlistListCreateView.as_view(), name="surveillance-watchlists"),
     path("surveillance/watchlists/<uuid:watchlist_id>/", SurveillanceWatchlistDetailView.as_view(), name="surveillance-watchlist-detail"),
     path("surveillance/watchlists/<uuid:watchlist_id>/poll/", SurveillanceWatchlistPollView.as_view(), name="surveillance-watchlist-poll"),
@@ -57,6 +68,11 @@ urlpatterns = [
         "<uuid:patent_id>/versions/<uuid:version_id>/process/",
         PatentVersionProcessView.as_view(),
         name="patent-version-process",
+    ),
+    path(
+        "<uuid:patent_id>/versions/<uuid:version_id>/index/<str:stage>/retry/",
+        PatentVersionIndexStageRetryView.as_view(),
+        name="patent-version-index-stage-retry",
     ),
     path(
         "<uuid:patent_id>/versions/<uuid:version_id>/file/",

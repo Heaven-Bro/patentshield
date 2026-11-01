@@ -12,7 +12,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
-from pgvector.django import VectorField
+from pgvector.django import HnswIndex, VectorField
 
 
 class PatentPublication(models.Model):
@@ -75,10 +75,12 @@ class PatentPublication(models.Model):
         db_index=True,
     )
     embedding = VectorField(
-        dimensions=384,
+        dimensions=1024,
         null=True,
         blank=True,
     )
+    embedding_model = models.CharField(max_length=200, blank=True, default="")
+    embedding_revision = models.CharField(max_length=100, blank=True, default="")
 
     filing_date = models.DateField(blank=True, null=True)
     publication_date = models.DateField(blank=True, null=True)
@@ -135,6 +137,14 @@ class PatentPublication(models.Model):
             models.Index(
                 fields=("sector_label",),
                 name="pat_pub_sector_idx",
+            ),
+            # Match the semantic query's CosineDistance operator.
+            HnswIndex(
+                name="pat_pub_emb_hnsw",
+                fields=("embedding",),
+                m=16,
+                ef_construction=64,
+                opclasses=("vector_cosine_ops",),
             ),
         ]
         ordering = ("-publication_date", "publication_number")

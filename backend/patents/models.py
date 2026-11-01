@@ -75,7 +75,16 @@ class PatentDocumentVersion(TenantScopedModel):
         PENDING = "PENDING", "Pending"
         EXTRACTING = "EXTRACTING", "Extracting"
         EXTRACTED = "EXTRACTED", "Extracted"
+        OCR_REQUIRED = "OCR_REQUIRED", "OCR required"
+        EXTRACTION_FAILED = "EXTRACTION_FAILED", "Extraction failed"
+        FAILED = "FAILED", "Failed (legacy)"
+
+    class StageStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        PROCESSING = "PROCESSING", "Processing"
+        INDEXED = "INDEXED", "Indexed"
         FAILED = "FAILED", "Failed"
+        SKIPPED = "SKIPPED", "Skipped"
 
     id = models.UUIDField(
         primary_key=True,
@@ -93,11 +102,34 @@ class PatentDocumentVersion(TenantScopedModel):
     mime_type = models.CharField(max_length=100, default="application/pdf")
     page_count = models.IntegerField(null=True, blank=True)
     extraction_status = models.CharField(
-        max_length=10,
+        max_length=20,
         choices=ExtractionStatus.choices,
         default=ExtractionStatus.PENDING,
     )
     extraction_started_at = models.DateTimeField(null=True, blank=True)
+    extraction_error_code = models.CharField(max_length=64, blank=True, default="")
+    text_indexing_status = models.CharField(
+        max_length=12,
+        choices=StageStatus.choices,
+        default=StageStatus.PENDING,
+        db_index=True,
+    )
+    schematic_indexing_status = models.CharField(
+        max_length=12,
+        choices=StageStatus.choices,
+        default=StageStatus.PENDING,
+        db_index=True,
+    )
+    text_indexing_attempts = models.PositiveSmallIntegerField(default=0)
+    schematic_indexing_attempts = models.PositiveSmallIntegerField(default=0)
+    # Persist Celery task IDs so duplicate extraction dispatches are harmless
+    # and late-ack redeliveries can resume the same reserved stage.
+    text_indexing_task_id = models.CharField(max_length=100, blank=True, default="")
+    schematic_indexing_task_id = models.CharField(max_length=100, blank=True, default="")
+    text_indexing_started_at = models.DateTimeField(null=True, blank=True)
+    schematic_indexing_started_at = models.DateTimeField(null=True, blank=True)
+    text_indexing_error_code = models.CharField(max_length=64, blank=True, default="")
+    schematic_indexing_error_code = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

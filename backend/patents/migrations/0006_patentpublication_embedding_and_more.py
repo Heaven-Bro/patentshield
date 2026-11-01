@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='patentpublication',
             name='embedding',
-            field=pgvector.django.vector.VectorField(blank=True, dimensions=384, null=True),
+            field=pgvector.django.vector.VectorField(blank=True, dimensions=1024, null=True),
         ),
         migrations.AddField(
             model_name='patentpublication',

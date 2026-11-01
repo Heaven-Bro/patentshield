@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from django.db import transaction
 from django.db.models import Prefetch
 from django.http import FileResponse, HttpRequest, HttpResponse
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -358,6 +360,8 @@ class PatentVersionProcessView(TenantPatentAPIView):
         if version.extraction_status not in {
             PatentDocumentVersion.ExtractionStatus.PENDING,
             PatentDocumentVersion.ExtractionStatus.FAILED,
+            PatentDocumentVersion.ExtractionStatus.OCR_REQUIRED,
+            PatentDocumentVersion.ExtractionStatus.EXTRACTION_FAILED,
         }:
             return Response(
                 {
@@ -395,6 +399,108 @@ class PatentVersionProcessView(TenantPatentAPIView):
                 "extraction_status": PatentDocumentVersion.ExtractionStatus.EXTRACTING,
                 "queue": "ingestion",
             },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class PatentVersionIndexStageRetryView(TenantPatentAPIView):
+    """Retry text or schematic indexing independently, without re-uploading."""
+
+    def get_permissions(self) -> list[Any]:
+        return [
+            permission()
+            for permission in (IsAuthenticated, HasTenantAccess, RequireTenantRole(*_UPLOAD_ROLES))
+        ]
+
+    def post(self, request: Request, patent_id: UUID, version_id: UUID, stage: str) -> Response:
+        tenant = self.get_tenant(request)
+        if stage not in {"text", "schematic"}:
+            return Response({"detail": "stage must be 'text' or 'schematic'."}, status=400)
+        try:
+            version = (
+                PatentDocumentVersion.objects.for_tenant(tenant.pk)
+                .select_related("patent")
+                .get(pk=version_id, patent_id=patent_id)
+            )
+        except PatentDocumentVersion.DoesNotExist as exc:
+            raise NotFound("Patent document version was not found.") from exc
+        require_matter_access(
+            request=request,
+            matter_type="patent",
+            matter_id=version.patent_id,
+            required="EDIT",
+        )
+        if version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
+            return Response(
+                {"detail": "Document extraction must complete before indexing can be retried.",
+                 "extraction_status": version.extraction_status},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        from indexing.tasks import extract_and_index_schematics, generate_document_embeddings
+
+        field_name = "text_indexing_status" if stage == "text" else "schematic_indexing_status"
+        error_field = "text_indexing_error_code" if stage == "text" else "schematic_indexing_error_code"
+        task = generate_document_embeddings if stage == "text" else extract_and_index_schematics
+        queue = "embedding" if stage == "text" else "ingestion"
+        stage_value = getattr(version, field_name)
+        task_id_field = "text_indexing_task_id" if stage == "text" else "schematic_indexing_task_id"
+        started_field = "text_indexing_started_at" if stage == "text" else "schematic_indexing_started_at"
+        started_at = getattr(version, started_field)
+        stale_processing = (
+            stage_value == PatentDocumentVersion.StageStatus.PROCESSING
+            and (started_at is None or started_at < timezone.now() - timedelta(minutes=30))
+        )
+        if stage_value == PatentDocumentVersion.StageStatus.PROCESSING and not stale_processing:
+            return Response({"detail": "The requested indexing stage is already processing."}, status=409)
+        if stage_value not in {PatentDocumentVersion.StageStatus.FAILED, PatentDocumentVersion.StageStatus.PENDING} and not stale_processing:
+            return Response({"detail": "Only failed, pending, or stale processing stages can be retried.", "stage_status": stage_value}, status=409)
+
+        task_id = str(uuid.uuid4())
+        updated = PatentDocumentVersion.objects.for_tenant(tenant.pk).filter(
+            pk=version.pk, **{field_name: stage_value, task_id_field: getattr(version, task_id_field)}
+        ).update(**{
+            field_name: PatentDocumentVersion.StageStatus.PENDING,
+            error_field: "", task_id_field: task_id, started_field: None,
+        })
+        if not updated:
+            return Response({"detail": "The indexing stage changed concurrently; refresh and retry."}, status=409)
+        request_id = getattr(getattr(request, "_request", request), "request_id", None)
+        try:
+            audit_event = AuditLog.objects.create(
+                tenant=tenant,
+                actor_user_id=request.user.pk,
+                request_id=request_id,
+                action=f"PATENT_{stage.upper()}_INDEX_RETRY_REQUESTED",
+                resource_type="PatentDocumentVersion",
+                resource_id=version.pk,
+                outcome=AuditLog.Outcome.FAILURE,
+                metadata={"stage": stage, "queue": queue, "task_id": task_id, "stage_state": "REQUESTED"},
+            )
+        except Exception as exc:
+            logger.exception("Index retry blocked because audit creation failed for version %s.", version.pk)
+            PatentDocumentVersion.objects.for_tenant(tenant.pk).filter(pk=version.pk).update(
+                **{field_name: PatentDocumentVersion.StageStatus.FAILED,
+                   error_field: "AUDIT_UNAVAILABLE", task_id_field: ""}
+            )
+            return Response({"detail": "Required audit storage is unavailable; no retry was queued."}, status=503)
+        try:
+            task.apply_async(args=[str(version.pk)], queue=queue, task_id=task_id)
+            AuditLog.objects.filter(pk=audit_event.pk, tenant=tenant).update(
+                outcome=AuditLog.Outcome.SUCCESS,
+                metadata={"stage": stage, "queue": queue, "task_id": task_id, "stage_state": "QUEUED"},
+            )
+        except Exception:
+            logger.exception("Could not queue %s indexing retry for version %s.", stage, version.pk)
+            PatentDocumentVersion.objects.for_tenant(tenant.pk).filter(pk=version.pk).update(
+                **{field_name: PatentDocumentVersion.StageStatus.FAILED,
+                   error_field: "QUEUE_FAILED", task_id_field: ""}
+            )
+            return Response({"detail": "The indexing retry could not be queued."}, status=503)
+        return Response(
+            {"patent_id": str(patent_id), "document_version_id": str(version.pk),
+             "stage": stage, "stage_status": PatentDocumentVersion.StageStatus.PENDING,
+             "queue": queue},
             status=status.HTTP_202_ACCEPTED,
         )
 
@@ -440,6 +546,8 @@ def _queue_document_processing(
         if version.extraction_status not in {
             PatentDocumentVersion.ExtractionStatus.PENDING,
             PatentDocumentVersion.ExtractionStatus.FAILED,
+            PatentDocumentVersion.ExtractionStatus.OCR_REQUIRED,
+            PatentDocumentVersion.ExtractionStatus.EXTRACTION_FAILED,
         }:
             return False, "VersionAlreadyProcessing"
 
@@ -504,6 +612,13 @@ def _serialize_version(version: PatentDocumentVersion) -> dict[str, Any]:
         "mime_type": version.mime_type,
         "page_count": version.page_count,
         "extraction_status": version.extraction_status,
+        "extraction_error_code": version.extraction_error_code,
+        "text_indexing_status": version.text_indexing_status,
+        "text_indexing_attempts": version.text_indexing_attempts,
+        "text_indexing_error_code": version.text_indexing_error_code,
+        "schematic_indexing_status": version.schematic_indexing_status,
+        "schematic_indexing_attempts": version.schematic_indexing_attempts,
+        "schematic_indexing_error_code": version.schematic_indexing_error_code,
         "created_at": version.created_at.isoformat(),
     }
 
