@@ -16,7 +16,8 @@ from audit.models import AuditLog
 from indexing.language import detect_language
 from indexing.models import TextChunk
 from multilingual_search.models import TranslationRecord
-from tenants.models import Tenant
+from tenants.models import Tenant, TenantExternalAIProcessingPolicy
+from enterprise_identity.services import matter_access_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,15 @@ def _tenant_translation_allowed(tenant_id: Any) -> None:
             "This tenant has not been authorized to disclose text to the "
             "translation service."
         )
+    policy = TenantExternalAIProcessingPolicy.objects.filter(tenant_id=tenant_id).first()
+    if policy is None or not policy.allows(
+        {"private_patent_content", "translation"},
+        provider="libretranslate",
+        model_name=str(getattr(settings, "PATENTSHIELD_TRANSLATION_ENGINE_VERSION", "configured-v1")),
+    ):
+        raise TranslationTenantNotAllowed(
+            "This tenant has no approved external-processing policy for patent translation."
+        )
     if not str(getattr(settings, "PATENTSHIELD_TRANSLATION_URL", "")).strip():
         raise TranslationDisabled("No translation service endpoint is configured.")
 
@@ -82,28 +92,40 @@ def _translate_with_libretranslate(
     if api_key:
         payload["api_key"] = api_key
 
+    max_response_bytes = int(getattr(settings, "PATENTSHIELD_TRANSLATION_MAX_RESPONSE_BYTES", 1_048_576))
     try:
-        response = requests.post(
+        with requests.post(
             endpoint,
             json=payload,
             headers={"Accept": "application/json"},
-            timeout=float(getattr(settings, "PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS", 15.0)),
+            timeout=(3.05, float(getattr(settings, "PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS", 15.0))),
             allow_redirects=False,
-        )
-    except requests.RequestException as exc:
+            stream=True,
+        ) as response:
+            if response.status_code < 200 or response.status_code >= 300:
+                logger.warning("Configured translation provider returned HTTP %s.", response.status_code)
+                raise TranslationProviderError(
+                    "The configured translation provider returned an unsuccessful response."
+                )
+            response_body = bytearray()
+            for piece in response.iter_content(chunk_size=65_536):
+                if not piece:
+                    continue
+                response_body.extend(piece)
+                if len(response_body) > max_response_bytes:
+                    raise TranslationProviderError(
+                        "The translation provider response exceeded the configured size limit."
+                    )
+        import json
+        result = json.loads(response_body.decode("utf-8"))
+    except TranslationProviderError:
+        raise
+    except (requests.RequestException, ValueError, UnicodeDecodeError) as exc:
         logger.warning("Configured translation provider request failed (%s).", type(exc).__name__)
         raise TranslationProviderError(
-            "The configured translation provider could not be reached."
+            "The configured translation provider could not be reached or returned invalid JSON."
         ) from exc
 
-    if response.status_code < 200 or response.status_code >= 300:
-        logger.warning("Configured translation provider returned HTTP %s.", response.status_code)
-        raise TranslationProviderError("The configured translation provider returned an unsuccessful response.")
-
-    try:
-        result = response.json()
-    except ValueError as exc:
-        raise TranslationProviderError("The translation provider returned invalid JSON.") from exc
     translated = result.get("translatedText") if isinstance(result, dict) else None
     if not isinstance(translated, str) or not translated.strip():
         raise TranslationProviderError("The translation provider returned no translated text.")
@@ -137,6 +159,10 @@ def translate_chunk(
         or str(chunk.document_version.patent_id) != str(chunk.patent_id)
     ):
         raise TranslationTenantNotAllowed("The requested source is not available in this tenant.")
+    if not matter_access_allowed(
+        tenant=tenant, user=actor, matter_type="patent", matter_id=chunk.patent_id, required="READ"
+    ):
+        raise TranslationTenantNotAllowed("You do not have READ access to this patent matter.")
 
     source_text = chunk.text
     if not source_text or not source_text.strip():
