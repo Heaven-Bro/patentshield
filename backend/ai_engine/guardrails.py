@@ -31,6 +31,7 @@ class GroundednessGuardrail:
         cls,
         assessments: list[dict[str, Any]],
         tenant_id: str | UUID,
+        actor_user_id: str | UUID,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """Return copied assessments with quote verification metadata and warnings."""
         updated: list[dict[str, Any]] = []
@@ -88,11 +89,23 @@ class GroundednessGuardrail:
             try:
                 # Import lazily so importing graph/node modules does not access
                 # Django models before the app registry is initialized.
+                from django.contrib.auth import get_user_model
+                from enterprise_identity.services import filter_visible_matter_queryset
                 from indexing.models import TextChunk
+                from patents.models import Patent
+                from tenants.models import Tenant
 
+                tenant = Tenant.objects.get(pk=tenant_id)
+                actor = get_user_model().objects.get(pk=actor_user_id)
+                if not actor.is_active:
+                    raise PermissionError("Analysis actor account is inactive.")
+                visible_patent_ids = filter_visible_matter_queryset(
+                    Patent.objects.for_tenant(tenant_id), tenant=tenant, user=actor,
+                    matter_type="patent",
+                ).values_list("pk", flat=True)
                 rows = (
                     TextChunk.objects.for_tenant(tenant_id)
-                    .filter(pk__in=list(cited_ids))
+                    .filter(pk__in=list(cited_ids), patent_id__in=visible_patent_ids)
                     .values(
                         "id",
                         "tenant_id",

@@ -62,6 +62,7 @@ class AnalysisState(TypedDict):
 
     analysis_id: str
     tenant_id: str
+    actor_user_id: NotRequired[str]
     target_patent_id: str
     target_claim_number: str
     claim_text: str

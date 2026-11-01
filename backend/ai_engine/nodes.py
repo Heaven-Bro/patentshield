@@ -146,7 +146,23 @@ def hybrid_retrieval_node(state: AnalysisState) -> dict[str, Any]:
     try:
         from django.conf import settings
 
+        from django.contrib.auth import get_user_model
+        from enterprise_identity.services import filter_visible_matter_queryset
+        from patents.models import Patent
         from retrieval.services import retrieve_evidence
+        from tenants.models import Tenant
+
+        actor_user_id = state.get("actor_user_id")
+        if not actor_user_id:
+            raise PermissionError("Analysis actor context is missing.")
+        tenant = Tenant.objects.get(pk=tenant_id)
+        actor = get_user_model().objects.get(pk=actor_user_id)
+        if not actor.is_active:
+            raise PermissionError("Analysis actor account is inactive.")
+        visible_patent_ids = filter_visible_matter_queryset(
+            Patent.objects.for_tenant(tenant_id), tenant=tenant, user=actor,
+            matter_type="patent",
+        ).values_list("pk", flat=True)
 
         top_n = int(
             getattr(settings, "PATENTSHIELD_LIMITATION_RETRIEVAL_TOP_N", 5)
@@ -191,6 +207,7 @@ def hybrid_retrieval_node(state: AnalysisState) -> dict[str, Any]:
                 query=query,
                 tenant_id=tenant_id,
                 top_n=top_n,
+                visible_patent_ids=visible_patent_ids,
             )
         except Exception as exc:
             failed_limitation_ids.add(limitation_id)
@@ -356,8 +373,12 @@ def groundedness_guardrail_node(state: AnalysisState) -> dict[str, Any]:
     try:
         from ai_engine.guardrails import GroundednessGuardrail
 
+        actor_user_id = state.get("actor_user_id")
+        if not actor_user_id:
+            raise PermissionError("Analysis actor context is missing.")
         assessments, warnings = GroundednessGuardrail.verify_assessments(
-            state.get("assessments", []), tenant_id=tenant_id
+            state.get("assessments", []), tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
         )
     except Exception as exc:
         # Guardrails must never convert an internal failure into a pass.
