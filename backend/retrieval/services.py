@@ -31,6 +31,7 @@ class DenseRetriever:
         tenant_id: str | UUID,
         top_k: int = 20,
         document_version_id: str | None = None,
+        visible_patent_ids=None,
     ) -> list[RetrievedCandidate]:
         """Run cosine-distance retrieval without crossing tenant boundaries.
 
@@ -53,6 +54,9 @@ class DenseRetriever:
             TextChunk.objects.for_tenant(tenant_id)
             .filter(
                 embedding__isnull=False,
+                embedding_model=BGEEmbedder.model_identity()[0],
+                embedding_revision=BGEEmbedder.model_identity()[1],
+                is_active=True,
                 patent__tenant_id=tenant_id,
                 document_version__tenant_id=tenant_id,
             )
@@ -61,9 +65,9 @@ class DenseRetriever:
             .order_by("distance", "pk")
         )
         if document_version_id is not None:
-            queryset = queryset.filter(
-                document_version_id=document_version_id
-            )
+            queryset = queryset.filter(document_version_id=document_version_id)
+        if visible_patent_ids is not None:
+            queryset = queryset.filter(patent_id__in=visible_patent_ids)
 
         results: list[RetrievedCandidate] = []
         for chunk in queryset[:top_k]:
@@ -347,6 +351,7 @@ class HybridSearchPipeline:
         query: str,
         tenant_id: str | UUID,
         top_n: int = 5,
+        visible_patent_ids=None,
     ) -> list[RetrievedCandidate]:
         """Return the highest-ranked tenant-scoped chunks as evidence candidates."""
         if not query or not query.strip():
@@ -368,11 +373,13 @@ class HybridSearchPipeline:
             query=query,
             tenant_id=tenant_id,
             top_k=candidate_pool_size,
+            visible_patent_ids=visible_patent_ids,
         )
         lexical_results = self._lexical_search(
             query=query,
             tenant_id=tenant_id,
             limit=candidate_pool_size,
+            visible_patent_ids=visible_patent_ids,
         )
         fused_results = self.fusion_service.fuse(
             dense_results=dense_results,
@@ -391,16 +398,11 @@ class HybridSearchPipeline:
         query: str,
         tenant_id: str | UUID,
         limit: int,
+        visible_patent_ids=None,
     ) -> list[RetrievedCandidate]:
         """Build and search the BM25 index, then restore trusted chunk metadata."""
-        max_chunks_setting = getattr(
-            settings,
-            "PATENTSHIELD_BM25_MAX_CHUNKS",
-            None,
-        )
-        max_chunks = (
-            int(max_chunks_setting) if max_chunks_setting is not None else None
-        )
+        max_chunks_setting = getattr(settings, "PATENTSHIELD_BM25_MAX_CHUNKS", 20_000)
+        max_chunks = int(max_chunks_setting)
         # Apply tenant predicates to the chunk and both parent relations. This
         # guards against malformed legacy rows whose foreign keys cross tenants.
         chunk_queryset = (
@@ -408,16 +410,16 @@ class HybridSearchPipeline:
             .filter(
                 patent__tenant_id=tenant_id,
                 document_version__tenant_id=tenant_id,
+                is_active=True,
             )
             .exclude(text="")
             .order_by("pk")
         )
-        if max_chunks is not None:
-            if max_chunks < 1:
-                raise ValueError(
-                    "PATENTSHIELD_BM25_MAX_CHUNKS must be positive when set."
-                )
-            chunk_queryset = chunk_queryset[:max_chunks]
+        if max_chunks < 1:
+            raise ValueError("PATENTSHIELD_BM25_MAX_CHUNKS must be positive.")
+        if visible_patent_ids is not None:
+            chunk_queryset = chunk_queryset.filter(patent_id__in=visible_patent_ids)
+        chunk_queryset = chunk_queryset[:max_chunks]
         rows = list(chunk_queryset.values_list("pk", "text"))
         lexical_index = BM25LexicalIndex(
             chunk_ids=[str(chunk_id) for chunk_id, _ in rows],
@@ -428,11 +430,15 @@ class HybridSearchPipeline:
             return []
 
         chunk_ids = [hit["chunk_id"] for hit in lexical_hits]
+        hydration_queryset = TextChunk.objects.for_tenant(tenant_id)
+        if visible_patent_ids is not None:
+            hydration_queryset = hydration_queryset.filter(patent_id__in=visible_patent_ids)
         chunks_by_id = {
             str(chunk.pk): chunk
-            for chunk in TextChunk.objects.for_tenant(tenant_id)
+            for chunk in hydration_queryset
             .filter(
                 pk__in=chunk_ids,
+                is_active=True,
                 patent__tenant_id=tenant_id,
                 document_version__tenant_id=tenant_id,
             )
@@ -522,10 +528,12 @@ def retrieve_evidence(
     query: str,
     tenant_id: str | UUID,
     top_n: int = 5,
+    visible_patent_ids=None,
 ) -> list[RetrievedCandidate]:
-    """Convenience entry point for the default hybrid retrieval pipeline."""
+    """Convenience entry point for tenant- and matter-scoped retrieval."""
     return HybridSearchPipeline().retrieve_evidence(
         query=query,
         tenant_id=tenant_id,
         top_n=top_n,
+        visible_patent_ids=visible_patent_ids,
     )
