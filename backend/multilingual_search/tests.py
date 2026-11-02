@@ -1,7 +1,7 @@
 """Phase 5 tests for translation safety, provider behavior, and tenant isolation."""
 
 import hashlib
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -48,9 +48,10 @@ class TranslationConfigurationTests(SimpleTestCase):
     )
     @patch("multilingual_search.services.requests.post")
     def test_provider_uses_bounded_request_without_following_redirects(self, post_mock):
-        response = Mock()
+        response = MagicMock()
         response.status_code = 200
         response.json.return_value = {"translatedText": "无线通信系统"}
+        response.__enter__.return_value = response
         post_mock.return_value = response
 
         translated = _translate_with_libretranslate("wireless communication system", "und", "zh")
@@ -73,9 +74,10 @@ class TranslationConfigurationTests(SimpleTestCase):
     def test_provider_rejects_http_redirects(self, post_mock):
         from multilingual_search.services import TranslationProviderError
 
-        response = Mock()
+        response = MagicMock()
         response.status_code = 302
         response.json.return_value = {"translatedText": "do not use"}
+        response.__enter__.return_value = response
         post_mock.return_value = response
         with self.assertRaises(TranslationProviderError):
             _translate_with_libretranslate("patent text", "und", "ja")

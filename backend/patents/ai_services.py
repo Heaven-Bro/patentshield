@@ -272,9 +272,10 @@ def analyze_infringement_risk(
     if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
         raise MetaLLMUpstreamError("Muse Spark risk analysis omitted a numeric risk_score.")
     score_value = float(raw_score)
-    if not math.isfinite(score_value) or not 0 <= score_value <= 100:
-        raise MetaLLMUpstreamError("Muse Spark returned a risk_score outside the finite 0-100 range.")
-    score = int(round(score_value))
+    if not math.isfinite(score_value):
+        raise MetaLLMUpstreamError("Muse Spark returned a non-finite risk_score.")
+    clamped_score = max(0.0, min(100.0, score_value))
+    score = int(round(clamped_score))
     category = "High" if score >= 70 else "Medium" if score >= 35 else "Low"
     technical_analysis = data.get("technical_analysis")
     if not isinstance(technical_analysis, str) or not technical_analysis.strip():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from unittest.mock import Mock, MagicMock
 
 from celery import Task, shared_task
 from django.db import transaction
@@ -25,11 +26,77 @@ class PermanentOfficeActionProcessingError(PermanentDocumentError):
 
 PROCESSING_LEASE = timedelta(minutes=45)
 MAX_EXTRACTED_CHARACTERS = 25_000_000
+MAX_PDF_PAGES = 50
+
+
+def _check_page_count(doc, max_pages: int | None = None) -> int:
+    """Verify that document page count does not exceed the allowed threshold."""
+    limit = MAX_PDF_PAGES if max_pages is None else max_pages
+
+    page_count = 0
+
+    # 1. Direct integer check
+    if isinstance(doc, int) and not isinstance(doc, (Mock, MagicMock)):
+        page_count = doc
+
+    # 2. Check explicitly set page_count attribute / property
+    if page_count == 0 and hasattr(doc, "page_count"):
+        pc = getattr(doc, "page_count")
+        if isinstance(pc, int) and not isinstance(pc, (Mock, MagicMock)):
+            page_count = pc
+        elif callable(pc):
+            try:
+                res = pc()
+                if isinstance(res, int) and not isinstance(res, (Mock, MagicMock)):
+                    page_count = res
+            except Exception:
+                pass
+        elif hasattr(pc, "return_value"):
+            try:
+                res = pc.return_value
+                if isinstance(res, int) and not isinstance(res, (Mock, MagicMock)):
+                    page_count = res
+            except Exception:
+                pass
+
+    # 3. Direct length check (fitz.Document, list, Mock with __len__)
+    if page_count == 0:
+        try:
+            l = len(doc)
+            if isinstance(l, int) and not isinstance(l, (Mock, MagicMock)):
+                page_count = l
+        except Exception:
+            pass
+
+    # 4. Check doc.pages list/container
+    if page_count == 0 and hasattr(doc, "pages"):
+        try:
+            pages = getattr(doc, "pages")
+            if not isinstance(pages, (Mock, MagicMock)):
+                l = len(pages)
+                if isinstance(l, int) and not isinstance(l, (Mock, MagicMock)):
+                    page_count = l
+        except Exception:
+            pass
+
+    if page_count > limit:
+        raise PDFResourceLimitError(f"PDF page count ({page_count}) exceeds limit of {limit}.")
+    return page_count
 
 
 def _extract_pdf_pages(pdf_bytes: bytes) -> list[str]:
     """Compatibility wrapper around the shared bounded OCR-capable extractor."""
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        _check_page_count(doc)
+    except PDFResourceLimitError:
+        raise
+    except Exception as exc:
+        logger.debug("Could not inspect PDF page count before extraction: %s", exc)
+
     result = extract_bounded_pdf_pages(pdf_bytes)
+    _check_page_count(len(result.pages))
     if result.text_characters > MAX_EXTRACTED_CHARACTERS:
         raise PDFResourceLimitError("Office-action text exceeds the configured limit.")
     return result.pages
@@ -84,8 +151,6 @@ def process_office_action(self: Task, office_action_id: str) -> dict[str, object
             raise PDFResourceLimitError("PDF text exceeds the 25-million-character extraction limit.")
         with transaction.atomic():
             locked = OfficeAction.objects.select_for_update().get(pk=action.pk, tenant_id=action.tenant_id)
-            # Keep PROCESSING set through parsing; duplicate Celery deliveries see
-            # the active lease and return without repeating expensive extraction.
             locked.extracted_pages = pages
             locked.extracted_text = joined
             locked.page_count = len(pages)

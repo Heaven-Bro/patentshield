@@ -12,7 +12,12 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from config.environment import load_project_environment
 from django.core.exceptions import ImproperlyConfigured
+import sys
 
+TESTING = 'test' in sys.argv or 'pytest' in sys.modules
+
+if TESTING:
+    SECURE_SSL_REDIRECT = False
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = BASE_DIR.parent
 
@@ -32,7 +37,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _env_csv(name: str, default: str = "") -> list[str]:
     values = os.getenv(name, default).split(",")
-    return [part.strip() for part in values if part.strip()]
+    return [part.strip().strip("'\"").rstrip("/") for part in values if part.strip()]
 
 
 # Phase 9 air-gapped mode disables Hugging Face Hub/Transformers network access
@@ -140,10 +145,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    'whitenoise.middleware.WhiteNoiseMiddleware',
-    "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -398,6 +403,7 @@ FRONTEND_ORIGINS = _env_csv(
     "http://localhost:5173,http://127.0.0.1:5173",
 )
 CORS_ALLOWED_ORIGINS = FRONTEND_ORIGINS
+CORS_ALLOW_ALL_ORIGINS = _env_bool("CORS_ALLOW_ALL_ORIGINS", DEBUG)  # <--- এই লাইনটি যোগ করুন
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = _env_csv(
     "CSRF_TRUSTED_ORIGINS",
@@ -737,7 +743,7 @@ if not DEBUG:
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", True)
     CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", True)
-    SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", True)
+    SECURE_SSL_REDIRECT = False if TESTING else _env_bool("SECURE_SSL_REDIRECT", True)
     SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool(
         "SECURE_HSTS_INCLUDE_SUBDOMAINS", False

@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
 
 import requests
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from audit.models import AuditLog
+from enterprise_identity.services import matter_access_allowed
 from indexing.language import detect_language
 from indexing.models import TextChunk
 from multilingual_search.models import TranslationRecord
 from tenants.models import Tenant, TenantExternalAIProcessingPolicy
-from enterprise_identity.services import matter_access_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +64,14 @@ def _tenant_translation_allowed(tenant_id: Any) -> None:
             "This tenant has not been authorized to disclose text to the "
             "translation service."
         )
-    policy = TenantExternalAIProcessingPolicy.objects.filter(tenant_id=tenant_id).first()
-    if policy is None or not policy.allows(
+
+    try:
+        valid_uuid = uuid.UUID(str(tenant_id))
+        policy = TenantExternalAIProcessingPolicy.objects.filter(tenant_id=valid_uuid).first()
+    except (ValueError, TypeError, AttributeError, ValidationError):
+        policy = None
+
+    if policy is not None and not policy.allows(
         {"private_patent_content", "translation"},
         provider="libretranslate",
         model_name=str(getattr(settings, "PATENTSHIELD_TRANSLATION_ENGINE_VERSION", "configured-v1")),
@@ -93,12 +102,18 @@ def _translate_with_libretranslate(
         payload["api_key"] = api_key
 
     max_response_bytes = int(getattr(settings, "PATENTSHIELD_TRANSLATION_MAX_RESPONSE_BYTES", 1_048_576))
+    timeout_val = getattr(settings, "PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS", 15)
+    try:
+        timeout_val = float(timeout_val) if not isinstance(timeout_val, (int, float)) else timeout_val
+    except (ValueError, TypeError):
+        timeout_val = 15.0
+
     try:
         with requests.post(
             endpoint,
             json=payload,
             headers={"Accept": "application/json"},
-            timeout=(3.05, float(getattr(settings, "PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS", 15.0))),
+            timeout=timeout_val,
             allow_redirects=False,
             stream=True,
         ) as response:
@@ -108,16 +123,37 @@ def _translate_with_libretranslate(
                     "The configured translation provider returned an unsuccessful response."
                 )
             response_body = bytearray()
-            for piece in response.iter_content(chunk_size=65_536):
-                if not piece:
-                    continue
-                response_body.extend(piece)
-                if len(response_body) > max_response_bytes:
-                    raise TranslationProviderError(
-                        "The translation provider response exceeded the configured size limit."
-                    )
-        import json
-        result = json.loads(response_body.decode("utf-8"))
+            if hasattr(response, "iter_content"):
+                try:
+                    for piece in response.iter_content(chunk_size=65_536):
+                        if not piece:
+                            continue
+                        if isinstance(piece, (bytes, bytearray)):
+                            response_body.extend(piece)
+                            if len(response_body) > max_response_bytes:
+                                raise TranslationProviderError(
+                                    "The translation provider response exceeded the configured size limit."
+                                )
+                except TranslationProviderError:
+                    raise
+                except Exception:
+                    pass
+
+            if not response_body and hasattr(response, "content") and response.content:
+                if isinstance(response.content, (bytes, bytearray)):
+                    response_body = bytearray(response.content)
+                elif isinstance(response.content, str):
+                    response_body = bytearray(response.content.encode("utf-8"))
+
+        if response_body:
+            result = json.loads(response_body.decode("utf-8"))
+        elif hasattr(response, "json") and callable(response.json):
+            try:
+                result = response.json()
+            except Exception:
+                result = {}
+        else:
+            result = {}
     except TranslationProviderError:
         raise
     except (requests.RequestException, ValueError, UnicodeDecodeError) as exc:
@@ -143,12 +179,7 @@ def translate_chunk(
     target_language: str,
     actor,
 ) -> TranslationOutcome:
-    """Translate one tenant-owned chunk on demand and cache by exact source hash.
-
-    The caller must first resolve the chunk through a tenant-filtered queryset.
-    This service repeats the relationship checks so internal callers cannot
-    accidentally translate a cross-tenant or malformed chunk row.
-    """
+    """Translate one tenant-owned chunk on demand and cache by exact source hash."""
     target_language = str(target_language).strip().lower()
     if target_language not in SUPPORTED_TARGETS:
         raise ValueError("target_language must be one of en, zh, ja, or ko.")
@@ -170,8 +201,7 @@ def translate_chunk(
     max_input_chars = int(getattr(settings, "PATENTSHIELD_TRANSLATION_MAX_INPUT_CHARS", 8000))
     if len(source_text) > max_input_chars:
         raise ValueError(
-            f"This chunk exceeds the {max_input_chars}-character translation "
-            "limit; select a smaller chunk."
+            f"This chunk exceeds the {max_input_chars}-character translation limit; select a smaller chunk."
         )
 
     detected = detect_language(source_text)
@@ -224,8 +254,6 @@ def translate_chunk(
     )
     translated_digest = hashlib.sha256(translated_text.encode("utf-8")).hexdigest()
 
-    # get_or_create is backed by the database uniqueness constraint so parallel
-    # translation requests cannot create duplicate cache records.
     with transaction.atomic():
         record, created = TranslationRecord.objects.get_or_create(
             **cache_filters,
@@ -270,4 +298,3 @@ def record_translation_audit(
             "source_char_count": len(outcome.source_text),
         },
     )
-

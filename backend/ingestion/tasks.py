@@ -250,7 +250,8 @@ def process_patent_document_version(
                 patent_id=document_version.patent_id,
                 document_version_id=document_version.pk,
             ).delete()
-            Claim.objects.bulk_create(claim_records, batch_size=200)
+            Claim.objects.filter(document_version=document_version).delete()
+            Claim.objects.bulk_create(claim_records, batch_size=200, ignore_conflicts=True)
             PatentDocumentVersion.objects.filter(
                 pk=document_version.pk,
                 tenant_id=document_version.tenant_id,
