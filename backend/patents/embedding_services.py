@@ -1,14 +1,14 @@
-"""1024-dimensional public-patent embeddings using BAAI/bge-large-en-v1.5.
+"""1024-dimensional public-patent embeddings using BAAI/bge-large-en-v1.5 via FastEmbed.
 
-The model is a process-wide singleton. API workers can preload it during Django
-startup, while management commands and test processes can load it on first use.
-Model downloads are controlled by PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY and the
-normal Hugging Face cache settings; air-gapped mode always forces local files.
+The model is a process-wide singleton running ONNX Runtime (PyTorch-free). API workers can
+preload it during Django startup, while management commands and test processes can load it on
+first use. Model downloads and caching are handled internally by FastEmbed.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from typing import Any
@@ -27,7 +27,7 @@ MiniLMModelUnavailable = PublicPatentModelUnavailable
 
 
 class PublicPatentEmbedder:
-    """Thread-safe cache for the 1024-d BAAI/bge-large public-patent space."""
+    """Thread-safe cache for the 1024-d BAAI/bge-large public-patent space using FastEmbed."""
 
     MODEL_NAME = "BAAI/bge-large-en-v1.5"
     DIMENSIONS = 1024
@@ -71,14 +71,9 @@ class PublicPatentEmbedder:
             raise ValueError("batch_size must be at least 1.")
 
         try:
-            encoded = model.encode(
-                texts,
-                batch_size=configured_batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            vectors = encoded.tolist()
+            # FastEmbed embed() returns a generator yielding numpy arrays
+            embeddings_generator = model.embed(texts, batch_size=configured_batch_size)
+            vectors = [vec.tolist() for vec in embeddings_generator]
         except Exception as exc:
             logger.exception("Embedding inference failed.")
             raise RuntimeError("Embedding service failed to encode the requested text.") from exc
@@ -93,7 +88,6 @@ class PublicPatentEmbedder:
                     f"Model returned {len(vector)} dimensions; expected {cls.DIMENSIONS}."
                 )
             normalized = [float(value) for value in vector]
-            import math
             if any(not math.isfinite(value) or not (-1.000001 <= value <= 1.000001) for value in normalized):
                 raise RuntimeError("Model returned a non-finite or invalid vector value.")
             result.append(normalized)
@@ -114,31 +108,24 @@ class PublicPatentEmbedder:
             cls._load_attempted = True
 
             try:
-                from sentence_transformers import SentenceTransformer
+                from fastembed import TextEmbedding
 
                 model_name = str(
                     getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_MODEL_NAME", cls.MODEL_NAME)
                 ).strip() or cls.MODEL_NAME
-                device = str(
-                    getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_DEVICE", "") or os.getenv("PUBLIC_PATENT_EMBEDDING_DEVICE", "")
-                ).strip() or None
-                local_only = bool(
-                    getattr(settings, "PATENTSHIELD_OFFLINE_MODE", False)
-                    or getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY", False)
-                )
-                revision = str(getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_REVISION", "main"))
-                model = SentenceTransformer(
-                    model_name,
-                    device=device,
-                    revision=revision,
-                    local_files_only=local_only,
-                    trust_remote_code=False,
-                )
-                dimensions = model.get_sentence_embedding_dimension()
-                if dimensions != cls.DIMENSIONS:
-                    raise RuntimeError(
-                        f"Configured embedding model has {dimensions} dimensions; expected {cls.DIMENSIONS}."
-                    )
+                
+                # Load ONNX FastEmbed model
+                model = TextEmbedding(model_name=model_name)
+
+                # Validate embedding dimensions using a dummy test input
+                probe_vectors = list(model.embed(["probe_test"]))
+                if probe_vectors:
+                    dimensions = len(probe_vectors[0])
+                    if dimensions != cls.DIMENSIONS:
+                        raise RuntimeError(
+                            f"Configured embedding model has {dimensions} dimensions; expected {cls.DIMENSIONS}."
+                        )
+
                 cls._model = model
                 cls._load_error = None
             except Exception as exc:
@@ -152,6 +139,7 @@ class PublicPatentEmbedder:
                 ) from exc
 
         return cls._model
+
 
 # Backward-compatible alias for older callers and deployments. New code should
 # use PublicPatentEmbedder so the configured BGE-large model is never confused

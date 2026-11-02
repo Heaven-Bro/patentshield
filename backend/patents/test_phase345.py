@@ -1,4 +1,4 @@
-"""Contract tests for MiniLM embeddings and Phase 5 response validation."""
+"""Contract tests for MiniLM/PublicPatent embeddings and Phase 5 response validation."""
 
 from __future__ import annotations
 
@@ -30,36 +30,38 @@ class MiniLMEmbedderTests(SimpleTestCase):
         MiniLMEmbedder._load_attempted = False
 
     @override_settings(
-        PATENTSHIELD_MINILM_MODEL_NAME="BAAI/bge-large-en-v1.5",
-        PATENTSHIELD_MINILM_DEVICE="",
-        PATENTSHIELD_MINILM_LOCAL_FILES_ONLY=True,
-        PATENTSHIELD_MINILM_BATCH_SIZE=8,
+        PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_MODEL_NAME="BAAI/bge-large-en-v1.5",
+        PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_BATCH_SIZE=8,
         PATENTSHIELD_OFFLINE_MODE=True,
     )
     def test_model_is_cached_and_vectors_are_1024_dimensions(self) -> None:
-        class Encoded:
-            def tolist(self):
-                return [[0.0, 1.0] + [0.0] * 1022]
+        class FakeVector:
+            def __init__(self, data: list[float]):
+                self._data = data
 
-        class FakeSentenceTransformer:
+            def __len__(self) -> int:
+                return len(self._data)
+
+            def tolist(self) -> list[float]:
+                return self._data
+
+        class FakeTextEmbedding:
             instances = 0
 
             def __init__(self, *args, **kwargs):
                 type(self).instances += 1
 
-            def get_sentence_embedding_dimension(self):
-                return 1024
+            def embed(self, texts, **kwargs):
+                for _ in texts:
+                    yield FakeVector([0.0, 1.0] + [0.0] * 1022)
 
-            def encode(self, texts, **kwargs):
-                return Encoded()
-
-        fake_module = ModuleType("sentence_transformers")
-        fake_module.SentenceTransformer = FakeSentenceTransformer
-        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+        fake_module = ModuleType("fastembed")
+        fake_module.TextEmbedding = FakeTextEmbedding
+        with patch.dict(sys.modules, {"fastembed": fake_module}):
             first = MiniLMEmbedder.embed_texts(["first patent"])
             second = MiniLMEmbedder.embed_texts(["second patent"])
 
-        self.assertEqual(FakeSentenceTransformer.instances, 1)
+        self.assertEqual(FakeTextEmbedding.instances, 1)
         self.assertEqual(len(first[0]), 1024)
         self.assertEqual(len(second[0]), 1024)
 

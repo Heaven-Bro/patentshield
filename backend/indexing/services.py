@@ -109,10 +109,10 @@ class HybridChunker:
 
 
 class BGEEmbedder:
-    """Lazy wrapper for local BAAI/bge-m3 dense embeddings.
+    """Lazy wrapper for local BAAI/bge-m3 dense embeddings via FastEmbed (ONNX Runtime).
 
-    Model weights are only loaded from the local Hugging Face cache. A
-    deterministic mock embedding is permitted in development when
+    Model inference runs lightweight via FastEmbed without requiring PyTorch/CUDA.
+    A deterministic mock embedding is permitted in development when
     ``PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS`` is enabled (or ``DEBUG`` is true and
     the setting is omitted). Production defaults to failing closed rather than
     silently persisting non-semantic vectors.
@@ -134,7 +134,7 @@ class BGEEmbedder:
 
     @classmethod
     def embed_texts(cls, texts: list[str]) -> list[list[float]]:
-        """Embed text with BGE-M3, returning normalized 1024-d vectors."""
+        """Embed text with FastEmbed BGE-M3, returning normalized 1024-d vectors."""
         if not texts:
             return []
         if any(not isinstance(text, str) or not text.strip() for text in texts):
@@ -145,7 +145,7 @@ class BGEEmbedder:
             if not cls._mock_fallback_allowed():
                 error = cls._load_error
                 raise RuntimeError(
-                    "BGE-M3 weights are unavailable locally. Install/cache the "
+                    "BGE-M3 weights are unavailable locally for FastEmbed. Install/cache the "
                     "model or explicitly enable the development-only mock."
                 ) from error
             logger.warning(
@@ -155,23 +155,19 @@ class BGEEmbedder:
             return [cls._mock_embedding(text) for text in texts]
 
         try:
-            encoded = model.encode(
-                texts,
-                batch_size=int(getattr(settings, "BGE_BATCH_SIZE", 32)),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            vectors = encoded.tolist()
+            batch_size = int(getattr(settings, "BGE_BATCH_SIZE", 32))
+            # FastEmbed's embed method returns a generator yielding NumPy arrays
+            embeddings_generator = model.embed(texts, batch_size=batch_size)
+            vectors = [vec.tolist() for vec in embeddings_generator]
         except Exception:
             # An inference error must not silently replace real embeddings
             # with mock vectors; Celery should retry the failed operation.
-            logger.exception("BGE-M3 inference failed.")
+            logger.exception("FastEmbed BGE-M3 inference failed.")
             raise
 
         if len(vectors) != len(texts):
             raise RuntimeError(
-                "BGE-M3 returned a different number of vectors than inputs."
+                "FastEmbed returned a different number of vectors than inputs."
             )
 
         normalized_vectors: list[list[float]] = []
@@ -183,13 +179,19 @@ class BGEEmbedder:
                 )
             normalized = [float(value) for value in vector]
             if any(not math.isfinite(value) for value in normalized):
-                raise RuntimeError("BGE-M3 returned a non-finite vector component.")
+                raise RuntimeError("FastEmbed returned a non-finite vector component.")
+            
+            # Ensure vectors are normalized (L2 norm)
+            magnitude = math.sqrt(sum(v * v for v in normalized))
+            if magnitude > 0 and not math.isclose(magnitude, 1.0, abs_tol=1e-3):
+                normalized = [v / magnitude for v in normalized]
+
             normalized_vectors.append(normalized)
         return normalized_vectors
 
     @classmethod
     def _get_model(cls) -> Any | None:
-        """Load SentenceTransformer once without permitting network downloads."""
+        """Load FastEmbed TextEmbedding model once without PyTorch dependency."""
         if cls._model is not None:
             return cls._model
 
@@ -201,34 +203,30 @@ class BGEEmbedder:
             cls._load_attempted = True
 
             try:
-                from sentence_transformers import SentenceTransformer
+                from fastembed import TextEmbedding
 
                 model_name = str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME))
-                revision = str(getattr(settings, "BGE_MODEL_REVISION", "main"))
-                device = os.getenv("BGE_DEVICE") or None
-                cls._model = SentenceTransformer(
-                    model_name,
-                    device=device,
-                    revision=revision,
-                    local_files_only=True,
-                    trust_remote_code=False,
-                )
-                dimensions = cls._model.get_sentence_embedding_dimension()
-                if dimensions != cls.DIMENSIONS:
-                    raise RuntimeError(
-                        f"Configured model has {dimensions} dimensions; "
-                        f"PatentShield requires {cls.DIMENSIONS}."
-                    )
+                cls._model = TextEmbedding(model_name=model_name)
+
+                # Validate embedding dimensions using a dummy test input
+                probe_vectors = list(cls._model.embed(["probe_test"]))
+                if probe_vectors:
+                    dimensions = len(probe_vectors[0])
+                    if dimensions != cls.DIMENSIONS:
+                        raise RuntimeError(
+                            f"Configured FastEmbed model has {dimensions} dimensions; "
+                            f"PatentShield requires {cls.DIMENSIONS}."
+                        )
             except Exception as exc:
                 cls._model = None
                 cls._load_error = exc
                 logger.warning(
-                    "Could not load local BGE-M3 model weights: %s",
+                    "Could not load local FastEmbed BGE-M3 model: %s",
                     type(exc).__name__,
                 )
                 if not cls._mock_fallback_allowed():
                     raise RuntimeError(
-                        "Unable to load local BGE-M3 weights."
+                        "Unable to load local FastEmbed BGE weights."
                     ) from exc
                 return None
 

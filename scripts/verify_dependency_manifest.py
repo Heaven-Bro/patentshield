@@ -30,6 +30,7 @@ REQUIRED_PACKAGES: dict[str, set[str]] = {
         "pydantic",
         "requests",
         "rank-bm25",
+        "fastembed",
         "pypdf",
         "pymupdf",
         "reportlab",
@@ -41,7 +42,7 @@ REQUIRED_PACKAGES: dict[str, set[str]] = {
         "django-storages",
     },
     "requirements-dev.txt": {"pytest", "pytest-django", "psutil"},
-    "requirements-ml.txt": {"sentence-transformers", "transformers", "torch"},
+    "requirements-ml.txt": {"fastembed"},
 }
 
 
