@@ -21,7 +21,6 @@ from retrieval.schemas import RetrievedCandidate
 logger = logging.getLogger(__name__)
 
 
-
 class DenseRetriever:
     """Retrieve the nearest embedded text chunks within one tenant."""
 
@@ -170,7 +169,7 @@ class ReciprocalRankFusionService:
 
 
 class CrossEncoderReranker:
-    """Rerank fused results using the locally cached BGE reranker model."""
+    """Rerank fused results using the locally cached FastEmbed BGE reranker model."""
 
     MODEL_NAME = "BAAI/bge-reranker-v2-m3"
     _model: Any | None = None
@@ -215,16 +214,10 @@ class CrossEncoderReranker:
                 min(1.0, max(0.0, float(score))) for score in raw_scores
             ]
         else:
-            pairs = [(query.strip(), candidate.text) for candidate in candidates]
+            documents = [candidate.text for candidate in candidates]
             try:
-                raw_scores = model.predict(
-                    pairs,
-                    batch_size=int(
-                        getattr(settings, "PATENTSHIELD_RERANKER_BATCH_SIZE", 16)
-                    ),
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                )
+                # FastEmbed rerank returns score generators/arrays per document
+                raw_scores = list(model.rerank(query.strip(), documents))
             except Exception:
                 logger.exception("Cross-encoder inference failed.")
                 raise
@@ -260,7 +253,7 @@ class CrossEncoderReranker:
 
     @classmethod
     def _get_model(cls) -> Any | None:
-        """Load CrossEncoder exactly once per worker process from local cache."""
+        """Load FastEmbed TextReranker exactly once per worker process from local cache."""
         if cls._model is not None:
             return cls._model
 
@@ -276,20 +269,19 @@ class CrossEncoderReranker:
 
             cls._load_attempted = True
             try:
-                from sentence_transformers import CrossEncoder
+                try:
+                    from fastembed import TextReranker
+                except ImportError:
+                    from fastembed.rerank.cross_encoder import TextCrossEncoder as TextReranker
 
-                cls._model = CrossEncoder(
-                    str(
-                        getattr(
-                            settings,
-                            "PATENTSHIELD_RERANKER_MODEL_NAME",
-                            cls.MODEL_NAME,
-                        )
-                    ),
-                    device=os.getenv("RERANKER_DEVICE") or None,
-                    local_files_only=True,
-                    trust_remote_code=False,
+                model_name = str(
+                    getattr(
+                        settings,
+                        "PATENTSHIELD_RERANKER_MODEL_NAME",
+                        cls.MODEL_NAME,
+                    )
                 )
+                cls._model = TextReranker(model_name=model_name)
             except Exception as exc:
                 cls._model = None
                 cls._load_error = exc

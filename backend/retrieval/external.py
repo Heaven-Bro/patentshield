@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -36,6 +37,8 @@ TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 HTTP_TIMEOUT_SECONDS = 10
 MAX_QUERY_LENGTH = 1_000
 MAX_PROVIDER_RESULTS = 50
+MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
+PROVIDER_RESPONSE_CHUNK_BYTES = 64 * 1024
 _RATE_LIMIT_LOCK_WAIT_SECONDS = 10.0
 _RATE_LIMIT_LOCK_LEASE_SECONDS = 30
 _LAST_REQUEST_TTL_SECONDS = 86_400
@@ -215,28 +218,17 @@ class USPTOSearchAdapter:
         )
         DistributedProviderRateLimiter.acquire("USPTO", rate_interval)
 
-        try:
-            response = requests.post(
-                getattr(settings, "PATENTSHIELD_USPTO_API_URL", USPTO_SEARCH_URL),
-                headers={"X-API-KEY": api_key, "Accept": "application/json"},
-                json={
-                    "q": query,
-                    "limit": result_limit,
-                    "offset": 0,
-                    "fields": USPTO_RESULT_FIELDS,
-                },
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-        except requests.Timeout as exc:
-            raise ExternalSearchError("USPTO request timed out.") from exc
-        except requests.RequestException as exc:
-            raise ExternalSearchError("USPTO request failed.") from exc
-
-        _raise_for_provider_response(response, self.provider)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ExternalSearchError("USPTO returned invalid JSON.") from exc
+        payload = _post_provider_json(
+            self.provider,
+            getattr(settings, "PATENTSHIELD_USPTO_API_URL", USPTO_SEARCH_URL),
+            headers={"X-API-KEY": api_key, "Accept": "application/json"},
+            json_body={
+                "q": query,
+                "limit": result_limit,
+                "offset": 0,
+                "fields": USPTO_RESULT_FIELDS,
+            },
+        )
         if not isinstance(payload, dict):
             raise ExternalSearchError("USPTO returned an unexpected response shape.")
 
@@ -288,35 +280,24 @@ class TavilySearchAdapter:
         )
         DistributedProviderRateLimiter.acquire("TAVILY", rate_interval)
 
-        try:
-            response = requests.post(
-                getattr(settings, "PATENTSHIELD_TAVILY_API_URL", TAVILY_SEARCH_URL),
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "api_key": api_key,
-                    "query": clean_query,
-                    "topic": "general",
-                    "search_depth": "basic",
-                    "max_results": result_limit,
-                    "include_answer": False,
-                    "include_raw_content": False,
-                    "include_images": False,
-                },
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-        except requests.Timeout as exc:
-            raise ExternalSearchError("Tavily request timed out.") from exc
-        except requests.RequestException as exc:
-            raise ExternalSearchError("Tavily request failed.") from exc
-
-        _raise_for_provider_response(response, self.provider)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ExternalSearchError("Tavily returned invalid JSON.") from exc
+        payload = _post_provider_json(
+            self.provider,
+            getattr(settings, "PATENTSHIELD_TAVILY_API_URL", TAVILY_SEARCH_URL),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json_body={
+                "api_key": api_key,
+                "query": clean_query,
+                "topic": "general",
+                "search_depth": "basic",
+                "max_results": result_limit,
+                "include_answer": False,
+                "include_raw_content": False,
+                "include_images": False,
+            },
+        )
         if not isinstance(payload, dict):
             raise ExternalSearchError("Tavily returned an unexpected response shape.")
 
@@ -651,11 +632,124 @@ def _get_active_tenant(tenant_id: str | uuid.UUID) -> Tenant:
         ) from exc
 
 
+def _validate_provider_endpoint(endpoint: str, provider: str) -> str:
+    """Allow only the fixed official HTTPS endpoint for each provider."""
+    expected = {
+        "USPTO": ("api.uspto.gov", "/api/v1/patent/applications/search"),
+        "TAVILY": ("api.tavily.com", "/search"),
+    }
+    if provider not in expected or not isinstance(endpoint, str) or len(endpoint) > 2_048:
+        raise ImproperlyConfigured(f"{provider} endpoint configuration is invalid.")
+    expected_host, expected_path = expected[provider]
+    try:
+        parsed = urlparse(endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise ImproperlyConfigured(
+            f"{provider} endpoint must use the official HTTPS API URL."
+        ) from exc
+    if (
+        parsed.scheme.casefold() != "https"
+        or (parsed.hostname or "").casefold() != expected_host
+        or port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path.rstrip("/") != expected_path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ImproperlyConfigured(
+            f"{provider} endpoint must use the official HTTPS API URL."
+        )
+    return endpoint
+
+
+def _read_bounded_provider_body(
+    response: requests.Response,
+    provider: str,
+) -> bytes:
+    """Read a provider response without buffering more than the configured cap."""
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError) as exc:
+            raise ExternalSearchError(
+                f"{provider} returned an invalid Content-Length."
+            ) from exc
+        if declared_length < 0 or declared_length > MAX_PROVIDER_RESPONSE_BYTES:
+            raise ExternalSearchError(
+                f"{provider} response exceeded the {MAX_PROVIDER_RESPONSE_BYTES}-byte limit."
+            )
+
+    body = bytearray()
+    try:
+        for chunk in response.iter_content(chunk_size=PROVIDER_RESPONSE_CHUNK_BYTES):
+            if not chunk:
+                continue
+            if len(body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
+                raise ExternalSearchError(
+                    f"{provider} response exceeded the {MAX_PROVIDER_RESPONSE_BYTES}-byte limit."
+                )
+            body.extend(chunk)
+    except requests.RequestException as exc:
+        raise ExternalSearchError(
+            f"{provider} response body could not be read."
+        ) from exc
+    return bytes(body)
+
+
+def _post_provider_json(
+    provider: str,
+    endpoint: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict[str, Any],
+) -> Any:
+    """POST to a fixed provider endpoint and parse a byte-bounded JSON response."""
+    safe_endpoint = _validate_provider_endpoint(endpoint, provider)
+    try:
+        response = requests.post(
+            safe_endpoint,
+            headers=headers,
+            json=json_body,
+            timeout=HTTP_TIMEOUT_SECONDS,
+            allow_redirects=False,
+            stream=True,
+        )
+    except requests.Timeout as exc:
+        raise ExternalSearchError(f"{provider} request timed out.") from exc
+    except requests.RequestException as exc:
+        raise ExternalSearchError(f"{provider} request failed.") from exc
+
+    try:
+        if 300 <= response.status_code < 400:
+            # Never replay a credential-bearing request to a redirect target.
+            raise ExternalSearchError(
+                f"{provider} returned an unsupported redirect; request blocked."
+            )
+        _raise_for_provider_response(response, provider)
+        body = _read_bounded_provider_body(response, provider)
+        try:
+            return json.loads(body)
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            raise ExternalSearchError(
+                f"{provider} returned invalid JSON."
+            ) from exc
+    finally:
+        response.close()
+
+
 def _raise_for_provider_response(
     response: requests.Response,
     provider: str,
 ) -> None:
     """Translate provider status into sanitized integration errors."""
+    if 300 <= response.status_code < 400:
+        raise ExternalSearchError(
+            f"{provider} returned an unsupported redirect; request blocked."
+        )
     if response.status_code == 429:
         retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
         logger.warning("External provider rate limited the request (%s).", provider)
