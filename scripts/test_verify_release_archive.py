@@ -21,6 +21,9 @@ class ReleaseArchivePolicyTests(unittest.TestCase):
         for name in (
             "repo/.git/config", "repo/__pycache__/x.pyc", "repo/node_modules/pkg/index.js",
             "repo/dist/index.js", "repo/.pytest_cache/data", "repo/app.pyc",
+            "backend/media/patents/tenant-1/patent-1/versions/source.pdf",
+            "backend/uploads/tenant-1/source.pdf",
+            "backend/staticfiles/admin/css/base.css",
         ):
             with self.subTest(name=name):
                 self.assertIsNotNone(reason_for_member(name))
@@ -38,6 +41,23 @@ class ReleaseArchivePolicyTests(unittest.TestCase):
             failures = verify_archive(str(archive_path))
             self.assertEqual(len(failures), 1)
             self.assertIn(".env", failures[0])
+
+    def test_tenant_media_and_staticfiles_are_rejected_in_real_archives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "candidate.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "PatentShield/backend/media/patents/tenant-1/patent-1/versions/fake.pdf",
+                    b"%PDF-1.7\\nredacted test fixture",
+                )
+                archive.writestr(
+                    "PatentShield/backend/staticfiles/admin/css/base.css",
+                    "/* generated */",
+                )
+            failures = verify_archive(str(archive_path))
+            self.assertEqual(len(failures), 2)
+            self.assertTrue(any("media" in failure for failure in failures))
+            self.assertTrue(any("staticfiles" in failure for failure in failures))
 
     def test_safe_archive_passes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -2,6 +2,7 @@
 """Find or untrack secrets and generated artifacts in the Git index.
 
 This utility never prints file contents and never deletes working-tree files.
+With --include-history it also checks reachable Git objects for sensitive paths.
 It does not rewrite commit history; leaked credentials must be rotated first.
 """
 
@@ -23,6 +24,7 @@ FORBIDDEN_DIRS = {
     "dist",
     "staticfiles",
     "media",
+    "uploads",
     "ml_model_cache",
     "htmlcov",
 }
@@ -79,6 +81,48 @@ def list_tracked_files(root: Path) -> list[str]:
     ]
 
 
+def list_historical_sensitive_paths(root: Path) -> list[str]:
+    """Return unsafe paths found in Git objects reachable from local refs.
+
+    Git's object listing exposes path names only; this deliberately avoids
+    printing or copying historical credential values.
+    """
+    result = subprocess.run(
+        ["git", "rev-list", "--objects", "--all"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    unsafe: set[str] = set()
+    for entry in result.stdout.decode("utf-8", errors="surrogateescape").splitlines():
+        _, separator, filename = entry.partition(" ")
+        if not separator or not filename:
+            continue
+        path = PurePosixPath(filename)
+        parts = {part.casefold() for part in path.parts}
+        # Historical source hygiene focuses on material that can expose
+        # credentials or customer documents. Generated caches/static output
+        # are still checked in the current index but need not trigger a history
+        # rewrite merely because an old cache blob is reachable.
+        is_sensitive = (
+            any(
+                part == ".env"
+                or (part.startswith(".env.") and part != ".env.example")
+                for part in parts
+            )
+            or bool(parts & {"media", "uploads"})
+            or path.name.casefold() in {
+                "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+                "private.key", "private_key.pem",
+            }
+            or path.suffix.casefold() in {".sqlite", ".sqlite3", ".p12", ".pfx", ".key"}
+            or (path.name.casefold().endswith(".pem") and path.name.casefold() != "cacert.pem")
+        )
+        if is_sensitive:
+            unsafe.add(filename)
+    return sorted(unsafe)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -90,6 +134,11 @@ def main() -> int:
         "--strict",
         action="store_true",
         help="return a nonzero exit code when findings remain",
+    )
+    parser.add_argument(
+        "--include-history",
+        action="store_true",
+        help="also reject sensitive paths in Git objects reachable from local refs",
     )
     args = parser.parse_args()
 
@@ -109,15 +158,34 @@ def main() -> int:
         path = PurePosixPath(filename)
         root_path = offending_root(path)
         if root_path is not None:
-            findings.setdefault(root_path, []).append(filename)
+            findings.setdefault(root_path, []).append(f"current index: {filename}")
+
+    if args.include_history:
+        try:
+            historical_paths = list_historical_sensitive_paths(root)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(
+                f"Cannot inspect Git history ({type(exc).__name__}); no files were changed.",
+                file=sys.stderr,
+            )
+            return 2
+        for filename in historical_paths:
+            root_path = offending_root(PurePosixPath(filename))
+            if root_path is not None:
+                findings.setdefault(root_path, []).append(f"Git history: {filename}")
 
     if not findings:
-        print("Git index hygiene passed: no known secret/generated paths found.")
+        print("Git index/history hygiene passed: no known secret or customer-data paths found.")
         return 0
 
-    print("Potential secret/generated paths are tracked (paths only; no contents):")
+    print("Potential secret/generated paths found (paths only; no contents):")
     for root_path, matched in sorted(findings.items(), key=lambda item: str(item[0])):
-        print(f"  {root_path} ({len(matched)} tracked path(s))")
+        current_count = sum(item.startswith("current index: ") for item in matched)
+        history_count = sum(item.startswith("Git history: ") for item in matched)
+        print(
+            f"  {root_path} ({current_count} current-index path(s), "
+            f"{history_count} historical path(s))"
+        )
 
     if args.untrack:
         targets = [str(path) for path in sorted(findings, key=str)]
@@ -134,8 +202,9 @@ def main() -> int:
         return 0
 
     print(
-        "Use --untrack to remove them from the index without deleting working files. "
-        "Use --strict in CI to fail while findings remain.",
+        "Use --untrack to remove current paths from the index without deleting working files. "
+        "Use --include-history with --strict in CI; historical secrets require a history rewrite "
+        "after credential rotation.",
         file=sys.stderr,
     )
     return 1 if args.strict else 0

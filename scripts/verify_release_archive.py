@@ -8,11 +8,22 @@ import zipfile
 from pathlib import PurePosixPath
 
 FORBIDDEN_COMPONENTS = {
+    # Version-control metadata and generated/development artifacts.
     ".git",
+    ".hg",
+    ".svn",
     "__pycache__",
     "node_modules",
     "dist",
     ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    # User/tenant data and generated deployment assets must never be part of a
+    # source release, even when the local directory is Git-ignored.
+    "media",
+    "uploads",
+    "staticfiles",
+    "ml_model_cache",
 }
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".pyd", ".sqlite3", ".sqlite3-journal"}
 PRIVATE_KEY_NAMES = {
@@ -28,7 +39,7 @@ def reason_for_member(name: str) -> str | None:
     parts = [part.casefold() for part in path.parts]
     basename = parts[-1] if parts else ""
     if any(part in FORBIDDEN_COMPONENTS for part in parts):
-        return "forbidden generated or VCS directory"
+        return "forbidden VCS, customer-data, or generated directory"
     for index, part in enumerate(parts):
         if part == ".env.example" and index == len(parts) - 1 and not normalized.endswith("/"):
             continue

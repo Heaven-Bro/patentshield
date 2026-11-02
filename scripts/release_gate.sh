@@ -18,8 +18,9 @@ printf '\n[1/10] Build and verify the exact sanitized release ZIP\n'
 python scripts/create_release_archive.py "$RELEASE_ARCHIVE" --root "$ROOT_DIR"
 python scripts/verify_release_archive.py "$RELEASE_ARCHIVE"
 python scripts/test_verify_release_archive.py
+python scripts/test_secure_repository_hygiene.py
 python scripts/verify_dependency_manifest.py --require-hashes
-python scripts/secure_repository_hygiene.py --strict
+python scripts/secure_repository_hygiene.py --strict --include-history
 
 printf '\n[2/10] Validate Docker Compose configuration\n'
 docker compose config -q
