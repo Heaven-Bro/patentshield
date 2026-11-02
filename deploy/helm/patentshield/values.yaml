@@ -57,6 +57,9 @@ networkPolicy:
   redisNamespaceSelector: {}
   redisPodSelector:
     app.kubernetes.io/name: redis
+  # When storage.backend=s3 and this policy is enabled, configure at least one
+  # route: an in-cluster objectStoragePodSelector, or private egress CIDRs on
+  # TCP/443. Rendering fails closed when neither route is configured.
   objectStorageNamespaceSelector: {}
   objectStoragePodSelector: {}
   additionalEgressCIDRs: []

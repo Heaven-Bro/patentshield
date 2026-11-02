@@ -1,3 +1,13 @@
+{{- if and .Values.networkPolicy.enabled (eq (.Values.storage.backend | default "s3") "s3") }}
+  {{- if and (empty .Values.networkPolicy.objectStoragePodSelector) (empty .Values.networkPolicy.additionalEgressCIDRs) }}
+    {{- fail "storage.backend=s3 with networkPolicy.enabled=true requires networkPolicy.objectStoragePodSelector for an in-cluster S3 endpoint or networkPolicy.additionalEgressCIDRs for a private endpoint (TCP/443)." }}
+  {{- end }}
+{{- end }}
+{{- range $index, $destination := .Values.networkPolicy.additionalEgressCIDRs }}
+  {{- if or (empty $destination.cidr) (empty $destination.ports) }}
+    {{- fail (printf "networkPolicy.additionalEgressCIDRs[%d] must define cidr and at least one TCP port." $index) }}
+  {{- end }}
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
