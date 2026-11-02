@@ -10,16 +10,17 @@ import os
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from dotenv import load_dotenv
+from config.environment import load_project_environment
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = BASE_DIR.parent
 
-# Compose and native development both use the root .env; existing deployments
-# may still place an environment file in backend/, so support it as a fallback.
-load_dotenv(REPOSITORY_ROOT / ".env", override=False)
-load_dotenv(BASE_DIR / ".env", override=False)
+# There is one local-development source of dotenv configuration: the
+# repository-root .env. backend/.env is deliberately not loaded because legacy
+# files there may contain stale/short secrets that fail or weaken startup policy.
+# Production containers should inject secrets through the orchestrator.
+load_project_environment(REPOSITORY_ROOT)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
