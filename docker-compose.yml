@@ -48,7 +48,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your repository-root .env file}
       HF_HOME: /models/huggingface
-      PATENTSHIELD_MINILM_PRELOAD_ON_STARTUP: ${PATENTSHIELD_MINILM_PRELOAD_ON_STARTUP:-false}
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_PRELOAD_ON_STARTUP: ${PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_PRELOAD_ON_STARTUP:-false}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/1}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
@@ -100,7 +100,10 @@ services:
       - config
       - worker
       - -Q
-      - ingestion,embedding,analysis,external_search,exports
+      - ingestion,analysis,external_search,exports
+      - --concurrency=${PATENTSHIELD_CELERY_WORKER_CONCURRENCY:-2}
+      - --prefetch-multiplier=1
+      - --max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-25}
       - --loglevel=INFO
     volumes:
       - ./backend:/app
@@ -111,6 +114,44 @@ services:
       redis:
         condition: service_healthy
 
+  # Transformer models are resident per worker process. Keep the embedding
+  # queue isolated and single-concurrency by default to avoid host OOM/VRAM spikes.
+  embedding_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_ML_DEPS: ${PATENTSHIELD_BUILD_ML_WORKER:-0}
+        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your repository-root .env file}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/1}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
+      CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
+      HF_HOME: /models/huggingface
+    command:
+      - celery
+      - -A
+      - config
+      - worker
+      - -Q
+      - embedding
+      - --concurrency=${PATENTSHIELD_EMBEDDING_WORKER_CONCURRENCY:-1}
+      - --prefetch-multiplier=1
+      - --max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-10}
+      - --loglevel=INFO
+    volumes:
+      - ./backend:/app
+      - ml_model_cache:/models/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   beat:
     build:

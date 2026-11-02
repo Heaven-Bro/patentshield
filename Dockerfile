@@ -31,10 +31,10 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/python -m pip install --upgrade pip \
     && /opt/venv/bin/python -m pip install -r /tmp/requirements.txt \
     && if [ "$INSTALL_ML_DEPS" = "1" ]; then \
-        /opt/venv/bin/python -m pip install -r /tmp/requirements-ml.txt; \
+        /opt/venv/bin/python -m pip install --no-require-hashes -r /tmp/requirements-ml.txt; \
     fi \
     && if [ "$INSTALL_DEV_DEPS" = "1" ]; then \
-        /opt/venv/bin/python -m pip install -r /tmp/requirements-dev.txt; \
+        /opt/venv/bin/python -m pip install --no-require-hashes -r /tmp/requirements-dev.txt; \
     fi
 
 FROM base AS runtime
@@ -50,6 +50,8 @@ RUN apt-get update \
         libxml2 \
         libxmlsec1 \
         libxmlsec1-openssl \
+        tesseract-ocr \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /usr/sbin/nologin django \
     && install -d -o django -g django /app/media /app/staticfiles
