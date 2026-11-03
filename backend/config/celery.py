@@ -64,6 +64,11 @@ app.conf.update(
             "schedule": 300.0,
             "options": {"queue": "ingestion"},
         },
+        "recover-stale-office-action-extractions": {
+            "task": "office_actions.tasks.recover_stale_office_action_extractions",
+            "schedule": 300.0,
+            "options": {"queue": "analysis"},
+        },
     },
 )
 

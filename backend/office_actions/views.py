@@ -50,7 +50,8 @@ from office_actions.services import (
     create_revision,
     record_review,
 )
-from office_actions.tasks import process_office_action
+from office_actions.dispatch import enqueue_office_action
+from office_actions.services import submit_for_review
 from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from patents.models import Patent
 from tenants.models import Tenant, TenantMembership
@@ -70,41 +71,6 @@ _REVIEW_ROLES = (
     TenantMembership.Role.ATTORNEY,
     TenantMembership.Role.REVIEWER,
 )
-
-
-def _enqueue_office_action(office_action: OfficeAction, actor) -> str | None:
-    """Attempt queue dispatch without rolling back an already committed upload."""
-    OfficeAction.objects.filter(pk=office_action.pk, tenant_id=office_action.tenant_id).update(
-        extraction_status=OfficeAction.ExtractionStatus.PENDING,
-        extraction_error_code="",
-    )
-    office_action.extraction_status = OfficeAction.ExtractionStatus.PENDING
-    office_action.extraction_error_code = ""
-    try:
-        task = process_office_action.apply_async(args=[str(office_action.pk)], queue="analysis")
-        return task.id
-    except Exception as exc:
-        OfficeAction.objects.filter(pk=office_action.pk, tenant_id=office_action.tenant_id).update(
-            extraction_status=OfficeAction.ExtractionStatus.FAILED,
-            extraction_error_code="ENQUEUE_FAILED",
-        )
-        # Keep the just-returned upload response truthful as well as updating DB state.
-        office_action.extraction_status = OfficeAction.ExtractionStatus.FAILED
-        office_action.extraction_error_code = "ENQUEUE_FAILED"
-        try:
-            AuditLog.objects.create(
-                tenant_id=office_action.tenant_id,
-                actor_user_id=actor.id if getattr(actor, "is_authenticated", False) else None,
-                action="OFFICE_ACTION_PROCESS_ENQUEUE_FAILED",
-                resource_type="OfficeAction",
-                resource_id=office_action.pk,
-                outcome=AuditLog.Outcome.FAILURE,
-                metadata={"error_type": type(exc).__name__},
-            )
-        except Exception:
-            logger.exception("Could not persist office-action enqueue failure audit event.")
-        logger.warning("Could not enqueue office-action processing for %s (%s).", office_action.pk, type(exc).__name__)
-        return None
 
 
 class TenantOfficeActionAPIView(APIView):
@@ -239,10 +205,11 @@ class OfficeActionListCreateView(TenantOfficeActionAPIView):
                     resource_id=office_action.pk,
                     metadata={"patent_id": str(patent.pk), "content_sha256": digest, "jurisdiction": office_action.jurisdiction, "action_type": office_action.action_type},
                 )
-                transaction.on_commit(lambda: _enqueue_office_action(office_action, request.user), robust=True)
+                transaction.on_commit(lambda: enqueue_office_action(office_action.pk, request.user), robust=True)
         except Exception:
             default_storage.delete(stored_key)
             raise
+        office_action.refresh_from_db()
         office_action.rejection_count = 0
         office_action.cited_reference_count = 0
         office_action.draft_count = 0
@@ -283,10 +250,12 @@ class OfficeActionProcessView(TenantOfficeActionAPIView):
     def post(self, request: Request, action_id) -> Response:
         action = self.action(request, action_id)
         require_matter_access(request=request, matter_type="office_action", matter_id=action.pk, required="EDIT")
-        task_id = _enqueue_office_action(action, request.user)
+        task_id, state = enqueue_office_action(action.pk, request.user)
+        if state == "ALREADY_COMPLETE":
+            return Response({"office_action_id": str(action.pk), "task_id": None, "status": "EXTRACTED", "detail": "This office action has already been processed."})
         if not task_id:
             return Response({"detail": "Processing could not be queued. The upload remains stored; retry when the worker broker is available."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        return Response({"office_action_id": str(action.pk), "task_id": task_id, "status": "QUEUED"}, status=status.HTTP_202_ACCEPTED)
+        return Response({"office_action_id": str(action.pk), "task_id": task_id, "status": state}, status=status.HTTP_202_ACCEPTED)
 
 
 class OfficeActionDraftListGenerateView(TenantOfficeActionAPIView):
@@ -320,20 +289,10 @@ class ResponseDraftSubmitForReviewView(TenantOfficeActionAPIView):
     def post(self, request: Request, draft_id) -> Response:
         draft = self.draft(request, draft_id)
         require_matter_access(request=request, matter_type="office_action", matter_id=draft.office_action_id, required="REVIEW")
-        if draft.status == ResponseDraft.Status.WITHDRAWN:
-            raise ValidationError("Withdrawn drafts cannot be submitted for review.")
-        if draft.current_revision_number <= 0 or not draft.revisions.filter(revision_number=draft.current_revision_number).exists():
-            raise ValidationError("Generate or save a draft revision before submitting it for review.")
-        draft.status = ResponseDraft.Status.IN_REVIEW
-        draft.save(update_fields=("status", "updated_at"))
-        AuditLog.objects.create(
-            tenant_id=draft.tenant_id,
-            actor_user_id=request.user.id if getattr(request.user, "is_authenticated", False) else None,
-            action="OFFICE_ACTION_DRAFT_SUBMITTED_FOR_REVIEW",
-            resource_type="ResponseDraft",
-            resource_id=draft.pk,
-            metadata={"revision_number": draft.current_revision_number},
-        )
+        try:
+            draft = submit_for_review(draft, request.user)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
         return Response(ResponseDraftSerializer(draft).data)
 
 
@@ -381,7 +340,10 @@ class ResponseDraftReviewView(TenantOfficeActionAPIView):
             TenantMembership.Role.OWNER, TenantMembership.Role.ADMIN, TenantMembership.Role.ATTORNEY,
         }:
             raise PermissionDenied("Only an attorney or tenant administrator may approve a response draft.")
-        review = record_review(revision, request.user, decision, serializer.validated_data["comments"])
+        try:
+            review = record_review(revision, request.user, decision, serializer.validated_data["comments"])
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
         return Response(OfficeActionReviewSerializer(review).data, status=status.HTTP_201_CREATED)
 
 

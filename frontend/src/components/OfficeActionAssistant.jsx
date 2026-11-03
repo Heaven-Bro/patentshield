@@ -30,9 +30,12 @@ function Badge({ value }) {
     COMPLETED: "bg-emerald-50 text-emerald-800 ring-emerald-200",
     NEEDS_REVIEW: "bg-amber-50 text-amber-800 ring-amber-200",
     PENDING: "bg-slate-100 text-slate-700 ring-slate-200",
+    QUEUED: "bg-indigo-50 text-indigo-800 ring-indigo-200",
     PROCESSING: "bg-blue-50 text-blue-800 ring-blue-200",
     RETRYING: "bg-amber-50 text-amber-800 ring-amber-200",
     FAILED: "bg-rose-50 text-rose-800 ring-rose-200",
+    EXTRACTION_FAILED: "bg-rose-50 text-rose-800 ring-rose-200",
+    OCR_REQUIRED: "bg-amber-50 text-amber-800 ring-amber-200",
     APPROVED: "bg-emerald-50 text-emerald-800 ring-emerald-200",
     CHANGES_REQUESTED: "bg-amber-50 text-amber-800 ring-amber-200",
   };
@@ -125,7 +128,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
   }, [loadDetail, selectedActionId]);
 
   useEffect(() => {
-    const active = actions.some((item) => ["PENDING", "PROCESSING", "RETRYING"].includes(item.extraction_status));
+    const active = actions.some((item) => ["PENDING", "QUEUED", "PROCESSING", "RETRYING"].includes(item.extraction_status));
     if (!active) return undefined;
     const timer = window.setTimeout(async () => {
       await loadActions();
@@ -314,7 +317,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
               {detail.extraction_error_code && <p className="mt-3 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">Extraction failed ({detail.extraction_error_code}). Scanned PDFs may require a separately configured OCR workflow.</p>}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button type="button" className={secondaryButtonClass} onClick={() => void downloadSourcePdf()}>Download original PDF</button>
-                <button type="button" className={secondaryButtonClass} onClick={() => void processAgain()} disabled={busy || ["PENDING", "PROCESSING", "RETRYING"].includes(detail.extraction_status)}>Re-run extraction</button>
+                <button type="button" className={secondaryButtonClass} onClick={() => void processAgain()} disabled={busy || ["PENDING", "QUEUED", "PROCESSING", "RETRYING"].includes(detail.extraction_status)}>Re-run extraction</button>
                 <button type="button" className={buttonClass} onClick={() => void generateDraft()} disabled={busy || detail.extraction_status !== "EXTRACTED"}>Generate evidence-linked draft</button>
               </div>
             </Card>

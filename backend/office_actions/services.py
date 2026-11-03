@@ -215,7 +215,8 @@ def parse_office_action(office_action: OfficeAction) -> dict[str, int]:
         for rejection in rejection_rows:
             for reference in reference_rows:
                 inside_span = (
-                    rejection.source_start_offset is not None
+                    rejection.source_page == reference.source_page
+                    and rejection.source_start_offset is not None
                     and rejection.source_end_offset is not None
                     and rejection.source_start_offset <= reference.source_start_offset <= rejection.source_end_offset
                 )
@@ -487,6 +488,8 @@ def create_revision(draft: ResponseDraft, user, content_markdown: str) -> Respon
         raise ValueError("Draft content cannot be blank.")
     with transaction.atomic():
         current = ResponseDraft.objects.select_for_update().get(pk=draft.pk, tenant_id=draft.tenant_id)
+        if current.status == ResponseDraft.Status.WITHDRAWN:
+            raise ValueError("Withdrawn drafts cannot be revised.")
         number = current.current_revision_number + 1
         previous = current.revisions.filter(revision_number=current.current_revision_number).first()
         manifest = previous.source_manifest if previous else {}
@@ -513,22 +516,73 @@ def create_revision(draft: ResponseDraft, user, content_markdown: str) -> Respon
         return revision
 
 
-def record_review(revision: ResponseDraftRevision, user, decision: str, comments: str) -> OfficeActionReview:
+def submit_for_review(draft: ResponseDraft, user) -> ResponseDraft:
+    """Atomically submit the current immutable revision for review."""
     with transaction.atomic():
+        current = (
+            ResponseDraft.objects.select_for_update()
+            .select_related("office_action")
+            .get(pk=draft.pk, tenant_id=draft.tenant_id)
+        )
+        if current.status not in {ResponseDraft.Status.DRAFT, ResponseDraft.Status.CHANGES_REQUESTED}:
+            raise ValueError("Only a draft or changes-requested response can be submitted for review.")
+        current_revision = current.revisions.filter(
+            revision_number=current.current_revision_number,
+            tenant_id=current.tenant_id,
+        ).first()
+        if current.current_revision_number <= 0 or current_revision is None:
+            raise ValueError("Generate or save a draft revision before submitting it for review.")
+        if current_revision.reviews.exists():
+            raise ValueError("This revision has already received a review decision. Create a new revision before resubmitting.")
+        current.status = ResponseDraft.Status.IN_REVIEW
+        current.save(update_fields=("status", "updated_at"))
+        AuditLog.objects.create(
+            tenant_id=current.tenant_id,
+            actor_user_id=user.pk,
+            action="OFFICE_ACTION_DRAFT_SUBMITTED_FOR_REVIEW",
+            resource_type="ResponseDraft",
+            resource_id=current.pk,
+            metadata={"revision_number": current.current_revision_number},
+        )
+        return current
+
+
+def record_review(revision: ResponseDraftRevision, user, decision: str, comments: str) -> OfficeActionReview:
+    """Record one review decision under a draft row lock.
+
+    Serializing this transition with revision creation prevents a stale
+    approval from being applied after a newer revision is created.
+    """
+    if decision not in OfficeActionReview.Decision.values:
+        raise ValueError("Unsupported Office Action review decision.")
+    with transaction.atomic():
+        draft = (
+            ResponseDraft.objects.select_for_update()
+            .get(pk=revision.draft_id, tenant_id=revision.tenant_id)
+        )
+        locked_revision = ResponseDraftRevision.objects.get(
+            pk=revision.pk,
+            tenant_id=draft.tenant_id,
+            draft_id=draft.pk,
+        )
+        if draft.status != ResponseDraft.Status.IN_REVIEW:
+            raise ValueError("The draft must be submitted for review before a decision is recorded.")
+        if draft.current_revision_number != locked_revision.revision_number:
+            raise ValueError("Only the currently submitted revision can receive a review decision.")
+        if decision == OfficeActionReview.Decision.APPROVED and (
+            draft.created_by_id == user.pk or locked_revision.generated_by_id == user.pk
+        ):
+            raise ValueError("A draft author cannot approve their own draft or revision.")
+
         review = OfficeActionReview.objects.create(
             tenant_id=revision.tenant_id,
-            revision=revision,
+            revision=locked_revision,
             reviewer=user,
             decision=decision,
             comments=comments.strip(),
         )
-        draft = revision.draft
         if decision == OfficeActionReview.Decision.APPROVED:
-            # Approval is only applied to the current revision, never a stale one.
-            if draft.current_revision_number == revision.revision_number:
-                draft.status = ResponseDraft.Status.APPROVED
-            else:
-                draft.status = ResponseDraft.Status.IN_REVIEW
+            draft.status = ResponseDraft.Status.APPROVED
         elif decision == OfficeActionReview.Decision.CHANGES_REQUESTED:
             draft.status = ResponseDraft.Status.CHANGES_REQUESTED
         else:

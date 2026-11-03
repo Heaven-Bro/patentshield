@@ -16,6 +16,7 @@ class OfficeAction(TenantScopedModel):
 
     class ExtractionStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
+        QUEUED = "QUEUED", "Queued"
         PROCESSING = "PROCESSING", "Processing"
         RETRYING = "RETRYING", "Retrying"
         EXTRACTED = "EXTRACTED", "Extracted"
@@ -55,12 +56,20 @@ class OfficeAction(TenantScopedModel):
     extraction_status = models.CharField(max_length=20, choices=ExtractionStatus.choices, default=ExtractionStatus.PENDING, db_index=True)
     parse_status = models.CharField(max_length=12, choices=ParseStatus.choices, default=ParseStatus.PENDING, db_index=True)
     extraction_error_code = models.CharField(max_length=80, blank=True, default="")
+    # Celery task ID acts as a fencing token. A stale worker cannot overwrite
+    # state reserved by a newer queue/recovery attempt.
+    processing_task_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    processing_reserved_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    processing_started_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("-issued_date", "-created_at")
-        indexes = [models.Index(fields=("tenant", "patent", "-created_at"), name="oa_tenant_patent_created_idx")]
+        indexes = [
+            models.Index(fields=("tenant", "patent", "-created_at"), name="oa_tenant_patent_created_idx"),
+            models.Index(fields=("tenant", "extraction_status", "processing_reserved_at"), name="oa_tenant_extract_res_idx"),
+        ]
         constraints = [models.CheckConstraint(condition=models.Q(response_due_date__isnull=True) | models.Q(issued_date__isnull=True) | models.Q(response_due_date__gte=models.F("issued_date")), name="oa_due_date_not_before_issue")]
 
     def clean(self):
