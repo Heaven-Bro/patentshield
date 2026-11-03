@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlsplit
+import uuid
 from datetime import timedelta
+from urllib.parse import urlsplit
 from typing import Any
 
 import requests
@@ -46,6 +47,8 @@ from patents.surveillance_services import (
 logger = logging.getLogger(__name__)
 POLL_STALE_AFTER = timedelta(minutes=45)
 DELIVERY_STALE_AFTER = timedelta(minutes=15)
+DELIVERY_DISPATCH_STALE_AFTER = timedelta(minutes=15)
+DELIVERY_ENQUEUE_RETRY_AFTER = timedelta(minutes=5)
 DEFAULT_MAX_DELIVERY_ATTEMPTS = 6
 # Bounded round-robin refresh prevents a long-lived watchlist from ignoring
 # previously observed records that no longer appear in a provider search page.
@@ -66,9 +69,88 @@ def _safe_provider_list(rule: SurveillanceWatchRule) -> list[str]:
     return providers or ["USPTO", "EPO"]
 
 
-def _mark_poll_failed(watchlist_id: str, code: str) -> None:
+def enqueue_alert_delivery(delivery_id: str) -> bool:
+    """Reserve and dispatch one delivery task without flooding the broker.
+
+    The reservation is committed before broker dispatch. A recent reservation
+    suppresses duplicate Beat ticks; an expired reservation is replaceable. The
+    task ID is a fencing token checked again by the delivery worker.
+    """
     now = timezone.now()
-    SurveillanceWatchlist.objects.filter(pk=watchlist_id).update(
+    task_id = str(uuid.uuid4())
+    with transaction.atomic():
+        delivery = (
+            AlertDelivery.objects.select_for_update()
+            .filter(pk=delivery_id)
+            .first()
+        )
+        if delivery is None:
+            return False
+        if delivery.status not in {
+            AlertDelivery.Status.QUEUED,
+            AlertDelivery.Status.RETRYING,
+            AlertDelivery.Status.SENDING,
+        }:
+            return False
+        if delivery.next_attempt_at is not None and delivery.next_attempt_at > now:
+            return False
+        if (
+            delivery.status == AlertDelivery.Status.SENDING
+            and delivery.last_attempt_at is not None
+            and delivery.last_attempt_at >= now - DELIVERY_STALE_AFTER
+        ):
+            return False
+
+        if (
+            delivery.dispatch_reserved_at is not None
+            and delivery.dispatch_reserved_at >= now - DELIVERY_DISPATCH_STALE_AFTER
+        ):
+            return False
+
+        delivery.active_task_id = task_id
+        delivery.dispatch_reserved_at = now
+        delivery.save(
+            update_fields=(
+                "active_task_id",
+                "dispatch_reserved_at",
+                "updated_at",
+            )
+        )
+
+    try:
+        deliver_alert.apply_async(
+            args=(str(delivery_id),),
+            queue="external_search",
+            task_id=task_id,
+        )
+    except Exception as exc:
+        # Release the reservation and move the next dispatch time forward.
+        # The scheduler respects next_attempt_at for QUEUED, RETRYING, and
+        # stale SENDING rows, so a broker outage cannot cause per-minute floods.
+        failed_at = timezone.now()
+        retry_at = failed_at + DELIVERY_ENQUEUE_RETRY_AFTER
+        AlertDelivery.objects.filter(
+            pk=delivery_id,
+            active_task_id=task_id,
+        ).update(
+            active_task_id="",
+            dispatch_reserved_at=None,
+            last_error_code="TASK_ENQUEUE_FAILED",
+            next_attempt_at=retry_at,
+            updated_at=failed_at,
+        )
+        logger.warning("Delivery task enqueue failed (%s).", type(exc).__name__)
+        return False
+    return True
+
+
+def _mark_poll_failed(watchlist_id: str, code: str, *, task_id: str) -> None:
+    now = timezone.now()
+    # Task IDs act as fencing tokens: an expired worker must not overwrite a
+    # newer reservation after the scheduler has recovered the watchlist.
+    SurveillanceWatchlist.objects.filter(
+        pk=watchlist_id, active_task_id=task_id
+    ).update(
         poll_status=SurveillanceWatchlist.PollStatus.FAILED,
         last_polled_at=now,
         next_poll_at=now + timedelta(minutes=15),
@@ -105,7 +187,10 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
         if not watchlist.is_active:
             return {"status": "INACTIVE", "watchlist_id": watchlist_id}
         if (
-            watchlist.poll_status == SurveillanceWatchlist.PollStatus.RUNNING
+            watchlist.poll_status in {
+                SurveillanceWatchlist.PollStatus.QUEUED,
+                SurveillanceWatchlist.PollStatus.RUNNING,
+            }
             and watchlist.poll_started_at is not None
             and watchlist.poll_started_at >= now - POLL_STALE_AFTER
             and watchlist.active_task_id != task_id
@@ -128,13 +213,13 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
         actor_id = watchlist.created_by_id
 
     if not bool(getattr(settings, "PATENTSHIELD_SURVEILLANCE_ENABLED", False)):
-        _mark_poll_failed(watchlist_id, "SURVEILLANCE_DISABLED")
+        _mark_poll_failed(watchlist_id, "SURVEILLANCE_DISABLED", task_id=task_id)
         return {"status": "DISABLED", "watchlist_id": watchlist_id}
 
     try:
         membership = assert_active_member(tenant_id=tenant_id, user_id=actor_id)
     except PermissionError:
-        _mark_poll_failed(watchlist_id, "OWNER_MEMBERSHIP_INACTIVE")
+        _mark_poll_failed(watchlist_id, "OWNER_MEMBERSHIP_INACTIVE", task_id=task_id)
         return {"status": "DENIED", "watchlist_id": watchlist_id}
 
     found = 0
@@ -151,7 +236,7 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
     )
 
     if not rules:
-        _mark_poll_failed(watchlist_id, "NO_ACTIVE_RULES")
+        _mark_poll_failed(watchlist_id, "NO_ACTIVE_RULES", task_id=task_id)
         return {"status": "NO_ACTIVE_RULES", "watchlist_id": watchlist_id}
 
     for rule in rules:
@@ -297,21 +382,21 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
         else SurveillanceWatchlist.PollStatus.FAILED
     )
     error_code = ",".join(dict.fromkeys(rule_errors))[:80]
-    SurveillanceWatchlist.objects.filter(
+    updated = SurveillanceWatchlist.objects.filter(
         pk=watchlist_id,
         tenant_id=tenant_id,
+        active_task_id=task_id,
     ).update(
         poll_status=status,
         last_polled_at=end,
         next_poll_at=end + timedelta(minutes=max(15, watchlist.poll_interval_minutes)),
-        active_task_id="",
         last_error_code=error_code,
         updated_at=end,
     )
-    if not rule_errors:
-        SurveillanceWatchlist.objects.filter(pk=watchlist_id, tenant_id=tenant_id).update(
-            last_success_at=end
-        )
+    if not updated:
+        # A newer scheduler reservation superseded this expired worker. Keep
+        # its state intact; the old task may not clear or rewrite the new lease.
+        return {"status": "SUPERSEDED", "watchlist_id": watchlist_id}
     try:
         record_surveillance_audit(
             tenant=membership.tenant,
@@ -334,12 +419,23 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
         logger.error("Surveillance poll audit write failed (%s).", type(exc).__name__)
         rule_errors.append("POLL_AUDIT_WRITE_FAILED")
         error_code = ",".join(dict.fromkeys(rule_errors))[:80]
-        SurveillanceWatchlist.objects.filter(pk=watchlist_id, tenant_id=tenant_id).update(
+        SurveillanceWatchlist.objects.filter(
+            pk=watchlist_id, tenant_id=tenant_id, active_task_id=task_id
+        ).update(
             poll_status=SurveillanceWatchlist.PollStatus.FAILED,
+            active_task_id="",
             last_error_code=error_code,
             updated_at=timezone.now(),
         )
         status = SurveillanceWatchlist.PollStatus.FAILED
+    else:
+        if not rule_errors:
+            SurveillanceWatchlist.objects.filter(
+                pk=watchlist_id, tenant_id=tenant_id, active_task_id=task_id
+            ).update(last_success_at=end)
+        SurveillanceWatchlist.objects.filter(
+            pk=watchlist_id, tenant_id=tenant_id, active_task_id=task_id
+        ).update(active_task_id="", updated_at=timezone.now())
     return {
         "status": status,
         "watchlist_id": watchlist_id,
@@ -479,6 +575,7 @@ def _send_delivery(delivery: AlertDelivery) -> tuple[int | None, str]:
 def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
     """Perform one persistently tracked delivery attempt with bounded retry state."""
     now = timezone.now()
+    task_id = str(getattr(self.request, "id", "") or "")
     attempt = None
     with transaction.atomic():
         delivery = (
@@ -503,12 +600,32 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
         ):
             delivery.status = AlertDelivery.Status.DEAD_LETTER
             delivery.last_error_code = "TENANT_BOUNDARY_MISMATCH"
-            delivery.save(update_fields=("status", "last_error_code", "updated_at"))
+            delivery.active_task_id = ""
+            delivery.dispatch_reserved_at = None
+            delivery.save(
+                update_fields=(
+                    "status",
+                    "last_error_code",
+                    "active_task_id",
+                    "dispatch_reserved_at",
+                    "updated_at",
+                )
+            )
             return {"status": "DEAD_LETTER", "error_code": "TENANT_BOUNDARY_MISMATCH"}
         if delivery.tenant.status != Tenant.Status.ACTIVE:
             delivery.status = AlertDelivery.Status.CANCELLED
             delivery.last_error_code = "TENANT_INACTIVE"
-            delivery.save(update_fields=("status", "last_error_code", "updated_at"))
+            delivery.active_task_id = ""
+            delivery.dispatch_reserved_at = None
+            delivery.save(
+                update_fields=(
+                    "status",
+                    "last_error_code",
+                    "active_task_id",
+                    "dispatch_reserved_at",
+                    "updated_at",
+                )
+            )
             return {"status": delivery.status, "delivery_id": delivery_id}
         if delivery.status in {
             AlertDelivery.Status.DELIVERED,
@@ -516,10 +633,22 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
             AlertDelivery.Status.CANCELLED,
         }:
             return {"status": delivery.status, "delivery_id": delivery_id}
+        if delivery.active_task_id and delivery.active_task_id != task_id:
+            return {"status": "SUPERSEDED", "delivery_id": delivery_id}
         if not delivery.destination.is_active:
             delivery.status = AlertDelivery.Status.CANCELLED
             delivery.last_error_code = "DESTINATION_INACTIVE"
-            delivery.save(update_fields=("status", "last_error_code", "updated_at"))
+            delivery.active_task_id = ""
+            delivery.dispatch_reserved_at = None
+            delivery.save(
+                update_fields=(
+                    "status",
+                    "last_error_code",
+                    "active_task_id",
+                    "dispatch_reserved_at",
+                    "updated_at",
+                )
+            )
             return {"status": delivery.status, "delivery_id": delivery_id}
         if (
             delivery.status == AlertDelivery.Status.SENDING
@@ -533,6 +662,11 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
         delivery.last_attempt_at = now
         delivery.next_attempt_at = None
         delivery.last_error_code = ""
+        # Direct task invocation (for example an operator's local replay) is
+        # still fenced; normal dispatch already populated this reservation.
+        if not delivery.active_task_id:
+            delivery.active_task_id = task_id
+            delivery.dispatch_reserved_at = now
         delivery.save(
             update_fields=(
                 "attempt_count",
@@ -540,6 +674,8 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
                 "last_attempt_at",
                 "next_attempt_at",
                 "last_error_code",
+                "active_task_id",
+                "dispatch_reserved_at",
                 "updated_at",
             )
         )
@@ -594,10 +730,34 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
     with transaction.atomic():
         locked_delivery = AlertDelivery.objects.select_for_update().get(pk=delivery_id)
         locked_attempt = AlertDeliveryAttempt.objects.select_for_update().get(pk=attempt.pk)
+        if locked_delivery.active_task_id != task_id:
+            # A stale worker completed after a newer reservation took over.
+            # Preserve the newer delivery state and make this attempt auditable.
+            locked_attempt.outcome = AlertDeliveryAttempt.Outcome.FAILED
+            locked_attempt.finished_at = finished
+            locked_attempt.error_code = "SUPERSEDED_ATTEMPT"
+            locked_attempt.response_summary = (
+                "Attempt finished after a newer delivery reservation took ownership."
+            )
+            locked_attempt.save(
+                update_fields=(
+                    "outcome",
+                    "finished_at",
+                    "error_code",
+                    "response_summary",
+                )
+            )
+            return {
+                "status": "SUPERSEDED",
+                "delivery_id": delivery_id,
+                "attempt_number": locked_attempt.attempt_number,
+            }
         locked_delivery.status = final_status
         locked_delivery.last_http_status = response_status
         locked_delivery.last_error_code = error_code
         locked_delivery.next_attempt_at = next_attempt_at
+        locked_delivery.active_task_id = ""
+        locked_delivery.dispatch_reserved_at = None
         if final_status == AlertDelivery.Status.DELIVERED:
             locked_delivery.delivered_at = finished
         locked_delivery.save(
@@ -607,6 +767,8 @@ def deliver_alert(self, delivery_id: str) -> dict[str, Any]:
                 "last_error_code",
                 "next_attempt_at",
                 "delivered_at",
+                "active_task_id",
+                "dispatch_reserved_at",
                 "updated_at",
             )
         )
@@ -666,38 +828,75 @@ def enqueue_due_watchlists(self, limit: int = 50) -> dict[str, int]:
         return {"enqueued": 0, "disabled": 1}
     now = timezone.now()
     safe_limit = max(1, min(200, int(limit)))
-    enqueued_ids: list[str] = []
+    enqueued: list[tuple[str, str]] = []
     with transaction.atomic():
+        due_time = Q(next_poll_at__isnull=True) | Q(next_poll_at__lte=now)
+        active_statuses = (
+            SurveillanceWatchlist.PollStatus.QUEUED,
+            SurveillanceWatchlist.PollStatus.RUNNING,
+        )
+        fresh_active = Q(
+            poll_status__in=active_statuses,
+            poll_started_at__gte=now - POLL_STALE_AFTER,
+        )
+        stale_active = Q(poll_status__in=active_statuses) & (
+            Q(poll_started_at__isnull=True)
+            | Q(poll_started_at__lt=now - POLL_STALE_AFTER)
+        )
         due = (
             SurveillanceWatchlist.objects.select_for_update(skip_locked=True)
             .filter(is_active=True)
-            .filter(Q(next_poll_at__isnull=True) | Q(next_poll_at__lte=now))
-            .exclude(
-                poll_status=SurveillanceWatchlist.PollStatus.RUNNING,
-                poll_started_at__gte=now - POLL_STALE_AFTER,
-            )
+            # A worker crash or a message lost after reservation can leave an
+            # active lease with a future next_poll_at. Include stale leases
+            # independently of the normal schedule so recovery does not wait up
+            # to the full seven-day polling interval.
+            .filter((due_time & ~fresh_active) | stale_active)
             .order_by("next_poll_at", "created_at")[:safe_limit]
         )
         for watchlist in due:
             # Moving the due marker before dispatch limits duplicate beat enqueues.
+            task_id = str(uuid.uuid4())
             watchlist.next_poll_at = now + timedelta(
                 minutes=max(15, watchlist.poll_interval_minutes)
             )
-            watchlist.save(update_fields=("next_poll_at", "updated_at"))
-            enqueued_ids.append(str(watchlist.pk))
+            watchlist.poll_status = SurveillanceWatchlist.PollStatus.QUEUED
+            watchlist.poll_started_at = now
+            watchlist.active_task_id = task_id
+            watchlist.last_error_code = ""
+            watchlist.save(
+                update_fields=(
+                    "next_poll_at",
+                    "poll_status",
+                    "poll_started_at",
+                    "active_task_id",
+                    "last_error_code",
+                    "updated_at",
+                )
+            )
+            enqueued.append((str(watchlist.pk), task_id))
 
     count = 0
-    for item_id in enqueued_ids:
+    for item_id, task_id in enqueued:
         try:
-            poll_watchlist.apply_async(args=(item_id,), queue="external_search")
+            poll_watchlist.apply_async(
+                args=(item_id,),
+                queue="external_search",
+                task_id=task_id,
+            )
             count += 1
         except Exception as exc:
-            # Make this row eligible again. Do not record private rule values.
+            # Clear the reservation so a broker error becomes promptly retryable.
             retry_at = timezone.now() + timedelta(minutes=5)
-            SurveillanceWatchlist.objects.filter(pk=item_id).update(
+            failed_at = timezone.now()
+            SurveillanceWatchlist.objects.filter(
+                pk=item_id, active_task_id=task_id
+            ).update(
+                poll_status=SurveillanceWatchlist.PollStatus.FAILED,
+                poll_started_at=None,
+                active_task_id="",
                 next_poll_at=retry_at,
                 last_error_code="TASK_ENQUEUE_FAILED",
-                updated_at=timezone.now(),
+                updated_at=failed_at,
             )
             logger.warning("Watchlist task enqueue failed (%s).", type(exc).__name__)
     return {"enqueued": count, "disabled": 0}
@@ -715,19 +914,27 @@ def recover_pending_deliveries(self, limit: int = 200) -> dict[str, int]:
         return {"enqueued": 0, "disabled": 1}
     now = timezone.now()
     safe_limit = max(1, min(500, int(limit)))
+    dispatch_stale = Q(dispatch_reserved_at__isnull=True) | Q(
+        dispatch_reserved_at__lt=now - DELIVERY_DISPATCH_STALE_AFTER
+    )
     candidates = AlertDelivery.objects.filter(
-        Q(status=AlertDelivery.Status.QUEUED)
-        | Q(status=AlertDelivery.Status.RETRYING, next_attempt_at__lte=now)
-        | Q(
-            status=AlertDelivery.Status.SENDING,
-            last_attempt_at__lt=now - DELIVERY_STALE_AFTER,
+        (
+            Q(status=AlertDelivery.Status.QUEUED, next_attempt_at__isnull=True)
+            | Q(status=AlertDelivery.Status.QUEUED, next_attempt_at__lte=now)
+            | Q(status=AlertDelivery.Status.RETRYING, next_attempt_at__lte=now)
+            | (
+                Q(status=AlertDelivery.Status.SENDING)
+                & (
+                    Q(last_attempt_at__isnull=True)
+                    | Q(last_attempt_at__lt=now - DELIVERY_STALE_AFTER)
+                )
+                & (Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
+            )
         )
+        & dispatch_stale
     ).order_by("created_at").values_list("pk", flat=True)[:safe_limit]
     enqueued = 0
     for delivery_id in candidates:
-        try:
-            deliver_alert.apply_async(args=(str(delivery_id),), queue="external_search")
+        if enqueue_alert_delivery(str(delivery_id)):
             enqueued += 1
-        except Exception as exc:
-            logger.warning("Delivery recovery enqueue failed (%s).", type(exc).__name__)
     return {"enqueued": enqueued, "disabled": 0}

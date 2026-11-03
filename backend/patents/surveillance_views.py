@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import timedelta
 
 from django.db import IntegrityError, transaction
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -564,9 +566,9 @@ class AlertDeliveryRetryView(APIView):
 
 def _enqueue_delivery(delivery_id: str) -> None:
     try:
-        from patents.surveillance_tasks import deliver_alert
+        from patents.surveillance_tasks import enqueue_alert_delivery
 
-        deliver_alert.apply_async(args=(delivery_id,), queue="external_search")
+        enqueue_alert_delivery(delivery_id)
     except Exception as exc:  # recovery task will enqueue it later
         logger.warning("Manual delivery retry enqueue deferred (%s).", type(exc).__name__)
 
@@ -576,35 +578,85 @@ class SurveillanceWatchlistPollView(APIView):
 
     def post(self, request: Request, watchlist_id: str) -> Response:
         _require_role(request, WRITE_ROLES)
-        watchlist = get_object_or_404(_base_queryset(request), pk=watchlist_id)
-        if not watchlist.is_active:
-            raise ValidationError({"detail": "Activate this watchlist before polling."})
         from django.conf import settings
 
         if not bool(getattr(settings, "PATENTSHIELD_SURVEILLANCE_ENABLED", False)):
             raise SurveillanceConfigurationUnavailable(
                 "Surveillance polling is disabled by deployment configuration."
             )
-        try:
-            from patents.surveillance_tasks import poll_watchlist
 
-            task = poll_watchlist.apply_async(
-                args=(str(watchlist.pk),),
-                queue="external_search",
-            )
+        now = timezone.now()
+        active_statuses = {
+            SurveillanceWatchlist.PollStatus.QUEUED,
+            SurveillanceWatchlist.PollStatus.RUNNING,
+        }
+        try:
+            from patents.surveillance_tasks import POLL_STALE_AFTER, poll_watchlist
+
+            with transaction.atomic():
+                watchlist = get_object_or_404(
+                    _base_queryset(request).select_for_update(), pk=watchlist_id
+                )
+                if not watchlist.is_active:
+                    raise ValidationError({"detail": "Activate this watchlist before polling."})
+
+                # Return the existing task while a recent reservation is queued
+                # or executing. This prevents repeated clicks from flooding the
+                # external-search queue with duplicate work.
+                if (
+                    watchlist.poll_status in active_statuses
+                    and watchlist.poll_started_at is not None
+                    and watchlist.poll_started_at >= now - POLL_STALE_AFTER
+                ):
+                    return Response(
+                        {
+                            "status": watchlist.poll_status,
+                            "task_id": watchlist.active_task_id,
+                            "watchlist_id": str(watchlist.pk),
+                            "already_active": True,
+                        },
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+
+                task_id = str(uuid.uuid4())
+                watchlist.poll_status = SurveillanceWatchlist.PollStatus.QUEUED
+                watchlist.poll_started_at = now
+                watchlist.active_task_id = task_id
+                watchlist.next_poll_at = now + timedelta(
+                    minutes=max(15, watchlist.poll_interval_minutes)
+                )
+                watchlist.last_error_code = ""
+                watchlist.save(
+                    update_fields=(
+                        "poll_status",
+                        "poll_started_at",
+                        "active_task_id",
+                        "next_poll_at",
+                        "last_error_code",
+                        "updated_at",
+                    )
+                )
+                task = poll_watchlist.apply_async(
+                    args=(str(watchlist.pk),),
+                    queue="external_search",
+                    task_id=task_id,
+                )
+                _audit(
+                    request,
+                    action="SURVEILLANCE_WATCHLIST_POLL_REQUESTED",
+                    resource_type="SurveillanceWatchlist",
+                    resource_id=watchlist.pk,
+                    metadata={"task_id": str(task.id)},
+                )
+        except (ValidationError, Http404):
+            raise
         except Exception as exc:
             logger.warning("Manual watchlist poll could not be queued (%s).", type(exc).__name__)
             return Response(
                 {"detail": "The poll could not be queued.", "code": "POLL_ENQUEUE_FAILED"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        _audit(
-            request,
-            action="SURVEILLANCE_WATCHLIST_POLL_REQUESTED",
-            resource_type="SurveillanceWatchlist",
-            resource_id=watchlist.pk,
-            metadata={"task_id": str(task.id)},
-        )
+
         return Response(
             {"status": "QUEUED", "task_id": str(task.id), "watchlist_id": str(watchlist.pk)},
             status=status.HTTP_202_ACCEPTED,

@@ -21,6 +21,7 @@ class SurveillanceWatchlist(TenantScopedModel):
 
     class PollStatus(models.TextChoices):
         IDLE = "IDLE", "Idle"
+        QUEUED = "QUEUED", "Queued"
         RUNNING = "RUNNING", "Running"
         SUCCEEDED = "SUCCEEDED", "Succeeded"
         FAILED = "FAILED", "Failed"
@@ -483,6 +484,10 @@ class AlertDelivery(TenantScopedModel):
     )
     attempt_count = models.PositiveSmallIntegerField(default=0)
     idempotency_key = models.CharField(max_length=64, unique=True)
+    # Durable broker-dispatch lease prevents Beat from enqueueing the same
+    # queued/recoverable delivery on every scheduler tick while workers lag.
+    active_task_id = models.CharField(max_length=100, blank=True, default="")
+    dispatch_reserved_at = models.DateTimeField(null=True, blank=True)
     next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
     last_attempt_at = models.DateTimeField(null=True, blank=True)
     delivered_at = models.DateTimeField(null=True, blank=True)
@@ -515,6 +520,10 @@ class AlertDelivery(TenantScopedModel):
             models.Index(
                 fields=("tenant", "status", "next_attempt_at"),
                 name="surv_delivery_due_idx",
+            ),
+            models.Index(
+                fields=("status", "dispatch_reserved_at"),
+                name="surv_deliv_dispatch_idx",
             ),
         ]
 

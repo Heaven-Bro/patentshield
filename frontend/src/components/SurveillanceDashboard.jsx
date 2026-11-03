@@ -66,6 +66,7 @@ function StateBadge({ value }) {
     DEAD_LETTER: "bg-rose-50 text-rose-800 ring-rose-200",
     FAILED: "bg-rose-50 text-rose-800 ring-rose-200",
     SUCCEEDED: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+    QUEUED: "bg-blue-50 text-blue-800 ring-blue-200",
     RUNNING: "bg-blue-50 text-blue-800 ring-blue-200",
   };
   return (

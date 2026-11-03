@@ -210,7 +210,10 @@ def record_surveillance_audit(
         safe_metadata.pop(prohibited, None)
     AuditLog.objects.create(
         tenant=tenant,
-        actor_user_id=actor.pk,
+        # Background jobs legitimately have no interactive user actor. Assigning
+        # the nullable FK itself preserves that system-actor audit event without
+        # dereferencing None or silently dropping the audit write.
+        actor_user=actor,
         action=action[:100],
         resource_type=resource_type[:100],
         resource_id=resource_id,
@@ -384,13 +387,10 @@ def emit_surveillance_alert(
             # during commit; a broker enqueue never represents successful delivery.
             def _enqueue_after_commit(ids: tuple[str, ...] = tuple(delivery_ids)) -> None:
                 try:
-                    from patents.surveillance_tasks import deliver_alert
+                    from patents.surveillance_tasks import enqueue_alert_delivery
 
                     for delivery_id in ids:
-                        deliver_alert.apply_async(
-                            args=(delivery_id,),
-                            queue="external_search",
-                        )
+                        enqueue_alert_delivery(delivery_id)
                 except Exception as exc:  # pragma: no cover - broker outage path
                     logger.warning(
                         "Alert delivery enqueue deferred to recovery task (%s).",
