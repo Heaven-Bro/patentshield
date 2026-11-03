@@ -42,6 +42,9 @@ spec:
             - { name: PATENTSHIELD_STORAGE_BACKEND, value: {{ .Values.storage.backend | quote }} }
             - { name: PATENTSHIELD_BGE_MODEL_PATH, value: "/models/bge-m3" }
             - { name: PATENTSHIELD_RERANKER_MODEL_PATH, value: "/models/reranker" }
+            - { name: PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR, value: "/models/fastembed-cache" }
+            - { name: PATENTSHIELD_MODEL_BUNDLE_MANIFEST, value: "/models/patentshield-model-bundle-manifest.json" }
+            - { name: PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY, value: "true" }
             - { name: HF_HUB_OFFLINE, value: "1" }
             - { name: TRANSFORMERS_OFFLINE, value: "1" }
             - { name: HF_HUB_DISABLE_TELEMETRY, value: "1" }

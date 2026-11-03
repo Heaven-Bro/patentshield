@@ -2,7 +2,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ .Release.Name }}-api
+  name: {{ .Release.Name }}-application
   labels:
     {{- include "patentshield.labels" . | nindent 4 }}
 spec:
@@ -16,11 +16,61 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: /
+          # Explicit application/API paths go to Django; the root SPA fallback
+          # belongs to the isolated static frontend service.
+          - path: /api
             pathType: Prefix
             backend:
               service:
                 name: {{ .Release.Name }}-api
                 port:
                   number: {{ .Values.service.port }}
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /static
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /media
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                {{- if .Values.frontend.enabled }}
+                name: {{ .Release.Name }}-frontend
+                port:
+                  number: {{ .Values.frontend.service.port }}
+                {{- else }}
+                name: {{ .Release.Name }}-api
+                port:
+                  number: {{ .Values.service.port }}
+                {{- end }}
 {{- end }}

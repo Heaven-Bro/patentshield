@@ -28,13 +28,12 @@ COPY requirements.txt /tmp/requirements.txt
 COPY requirements-ml.txt /tmp/requirements-ml.txt
 COPY requirements-dev.txt /tmp/requirements-dev.txt
 RUN python -m venv /opt/venv \
-    && /opt/venv/bin/python -m pip install --upgrade pip \
-    && /opt/venv/bin/python -m pip install -r /tmp/requirements.txt \
+    && /opt/venv/bin/python -m pip install --require-hashes -r /tmp/requirements.txt \
     && if [ "$INSTALL_ML_DEPS" = "1" ]; then \
-        /opt/venv/bin/python -m pip install --no-require-hashes -r /tmp/requirements-ml.txt; \
+        /opt/venv/bin/python -m pip install --require-hashes -r /tmp/requirements-ml.txt; \
     fi \
     && if [ "$INSTALL_DEV_DEPS" = "1" ]; then \
-        /opt/venv/bin/python -m pip install --no-require-hashes -r /tmp/requirements-dev.txt; \
+        /opt/venv/bin/python -m pip install --require-hashes -r /tmp/requirements-dev.txt; \
     fi
 
 FROM base AS runtime
@@ -59,6 +58,18 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=django:django backend/ /app/
+
+# Collect Django admin and application static assets into STATIC_ROOT at image
+# build time. WhiteNoise serves these files in the offline runtime; no database
+# connection or customer secret is used by this build-only command.
+RUN DJANGO_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(64))')" \
+    DJANGO_DEBUG=True \
+    ALLOWED_HOSTS=localhost,127.0.0.1 \
+    DB_NAME=staticfiles_build \
+    DB_USER=staticfiles_build \
+    DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+    python manage.py collectstatic --noinput \
+    && chown -R django:django /app/staticfiles
 
 USER django
 EXPOSE 8000

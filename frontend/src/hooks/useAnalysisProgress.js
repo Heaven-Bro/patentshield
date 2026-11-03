@@ -15,7 +15,7 @@ const EMPTY_SESSION = Object.freeze({
 function makeWebSocketUrl(analysisId) {
   const configuredWsBase = import.meta.env.VITE_WS_BASE_URL;
   const configuredApiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-  const parsed = new URL(configuredWsBase || configuredApiBase);
+  const parsed = new URL(configuredWsBase || configuredApiBase, window.location.origin);
   if (parsed.protocol === "http:") parsed.protocol = "ws:";
   else if (parsed.protocol === "https:") parsed.protocol = "wss:";
   if (!new Set(["ws:", "wss:"]).has(parsed.protocol)) {

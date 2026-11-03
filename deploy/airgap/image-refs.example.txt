@@ -1,2 +1,8 @@
-# Replace with the real digest-pinned application image released and signed by your organization.
-# Format: registry.example.invalid/patentshield@sha256:<64 lowercase hexadecimal characters>
+# Every image reference must be digest-pinned, mirrored to the approved private registry,
+# and signed with the release key used by scripts/export_signed_oci_bundle.sh.
+# Kubernetes customers may provision their own managed database and Redis services,
+# but the signed transfer release still carries these images for Compose installations.
+# registry.internal.example/patentshield-api@sha256:<64 lowercase hexadecimal characters>
+# registry.internal.example/patentshield-frontend@sha256:<64 lowercase hexadecimal characters>
+# registry.internal.example/pgvector@sha256:<64 lowercase hexadecimal characters>
+# registry.internal.example/redis@sha256:<64 lowercase hexadecimal characters>

@@ -291,10 +291,30 @@ class CrossEncoderReranker:
                 model_name = str(
                     getattr(settings, "PATENTSHIELD_RERANKER_MODEL_NAME", cls.MODEL_NAME)
                 )
+                model_revision = str(
+                    getattr(settings, "PATENTSHIELD_RERANKER_MODEL_REVISION", "main")
+                )
                 model_source = model_path or model_name
                 if model_path and not os.path.isdir(model_path):
                     raise RuntimeError(
                         "Configured PATENTSHIELD_RERANKER_MODEL_PATH is not a directory."
+                    )
+                if bool(getattr(settings, "PATENTSHIELD_OFFLINE_MODE", False)):
+                    from deployment.model_manifest import verify_installed_model
+
+                    manifest_path = str(
+                        getattr(settings, "PATENTSHIELD_MODEL_BUNDLE_MANIFEST", "") or ""
+                    ).strip()
+                    if not model_path or not manifest_path:
+                        raise RuntimeError(
+                            "Air-gapped reranking requires a local model path and verified bundle manifest."
+                        )
+                    verify_installed_model(
+                        manifest_path,
+                        model_key="reranker",
+                        expected_model_id=model_name,
+                        expected_revision=model_revision,
+                        installed_model_dir=model_path,
                     )
 
                 kwargs: dict[str, Any] = {

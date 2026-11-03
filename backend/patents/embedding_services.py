@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from django.conf import settings
@@ -114,8 +115,51 @@ class PublicPatentEmbedder:
                     getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_MODEL_NAME", cls.MODEL_NAME)
                 ).strip() or cls.MODEL_NAME
                 
-                # Load ONNX FastEmbed model
-                model = TextEmbedding(model_name=model_name)
+                # FastEmbed's model cache is a Hugging Face cache layout. In
+                # air-gapped mode the signed Phase 9 model installer provisions
+                # this directory and local_files_only prevents any hub fallback.
+                cache_dir = str(
+                    getattr(
+                        settings,
+                        "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR",
+                        "",
+                    )
+                    or ""
+                ).strip() or None
+                offline_mode = bool(getattr(settings, "PATENTSHIELD_OFFLINE_MODE", False))
+                local_files_only = bool(
+                    getattr(settings, "PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY", False)
+                    or offline_mode
+                )
+                bundle_manifest_path = str(
+                    getattr(settings, "PATENTSHIELD_MODEL_BUNDLE_MANIFEST", "") or ""
+                ).strip()
+                if offline_mode:
+                    from deployment.model_manifest import verify_installed_model
+
+                    if not bundle_manifest_path or not cache_dir:
+                        raise RuntimeError(
+                            "Air-gapped public-patent embeddings require a model cache and verified bundle manifest."
+                        )
+                    configured_revision = cls.model_identity()[1]
+                    installed_snapshot = (
+                        Path(cache_dir)
+                        / "models--qdrant--bge-large-en-v1.5-onnx"
+                        / "snapshots"
+                        / configured_revision
+                    )
+                    verify_installed_model(
+                        bundle_manifest_path,
+                        model_key="public-patent-embedding",
+                        expected_model_id=model_name,
+                        expected_revision=configured_revision,
+                        installed_model_dir=installed_snapshot,
+                    )
+                model = TextEmbedding(
+                    model_name=model_name,
+                    cache_dir=cache_dir,
+                    local_files_only=local_files_only,
+                )
 
                 # Validate embedding dimensions using a dummy test input
                 probe_vectors = list(model.embed(["probe_test"]))

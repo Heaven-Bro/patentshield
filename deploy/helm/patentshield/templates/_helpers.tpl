@@ -29,3 +29,12 @@ readOnlyRootFilesystem: true
 capabilities:
   drop: ["ALL"]
 {{- end -}}
+
+{{- define "patentshield.frontendImage" -}}
+{{- $repository := required "Set frontend.image.repository to the internal signed frontend image repository" .Values.frontend.image.repository -}}
+{{- $digest := required "Set frontend.image.digest to a signed sha256 digest; image tags are not accepted" .Values.frontend.image.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
+{{- fail "frontend.image.digest must match sha256:<64 lowercase hex characters>" -}}
+{{- end -}}
+{{ printf "%s@%s" $repository $digest }}
+{{- end -}}

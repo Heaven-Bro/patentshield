@@ -2,15 +2,13 @@ name: patentshield
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${PATENTSHIELD_POSTGRES_IMAGE:?Set PATENTSHIELD_POSTGRES_IMAGE to an imported digest-pinned pgvector image}
+    pull_policy: never
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-patentshield}
       POSTGRES_USER: ${POSTGRES_USER:-patentshield}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env file}
-    # Local loopback only; production deployments should remove host port publishing.
-    ports:
-      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,12 +19,10 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:7-alpine
+    image: ${PATENTSHIELD_REDIS_IMAGE:?Set PATENTSHIELD_REDIS_IMAGE to an imported digest-pinned Redis image}
+    pull_policy: never
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
-    # Local loopback only; production deployments should remove host port publishing.
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -37,30 +33,35 @@ services:
       start_period: 5s
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_ML_DEPS: ${PATENTSHIELD_BUILD_ML_WORKER:-0}
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+    image: ${PATENTSHIELD_BACKEND_IMAGE:?Set PATENTSHIELD_BACKEND_IMAGE to the imported digest-pinned backend image}
+    pull_policy: never
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your repository-root .env file}
-      HF_HOME: /models/huggingface
+      HF_HOME: /tmp/huggingface
+      PATENTSHIELD_OFFLINE_MODE: "true"
+      PATENTSHIELD_EXTERNAL_SEARCH_ENABLED: "false"
+      PATENTSHIELD_TRANSLATION_ENABLED: "false"
+      PATENTSHIELD_SURVEILLANCE_ENABLED: "false"
+      PATENTSHIELD_CONNECTOR_SYNC_ENABLED: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PATENTSHIELD_BGE_MODEL_PATH: /models/bge-m3
+      PATENTSHIELD_RERANKER_MODEL_PATH: /models/reranker
       PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_PRELOAD_ON_STARTUP: ${PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_PRELOAD_ON_STARTUP:-false}
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR: /models/fastembed-cache
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY: "true"
+      PATENTSHIELD_MODEL_BUNDLE_MANIFEST: /models/patentshield-model-bundle-manifest.json
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/1}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
       CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
     command: ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
-    # Bind only to loopback; production should route through a TLS ingress/proxy.
-    ports:
-      - "127.0.0.1:8000:8000"
     volumes:
-      - ./backend:/app
-      - ml_model_cache:/models/huggingface
+      - ${PATENTSHIELD_INSTALLED_MODELS_DIR:-./offline/installed-models}:/models:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,13 +78,21 @@ services:
       retries: 5
       start_period: 15s
 
+  frontend:
+    image: ${PATENTSHIELD_FRONTEND_IMAGE:?Set PATENTSHIELD_FRONTEND_IMAGE to the imported digest-pinned frontend image}
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./deploy/airgap/nginx-compose.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_ML_DEPS: ${PATENTSHIELD_BUILD_ML_WORKER:-0}
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+    image: ${PATENTSHIELD_BACKEND_IMAGE:?Set PATENTSHIELD_BACKEND_IMAGE to the imported digest-pinned backend image}
+    pull_policy: never
     restart: unless-stopped
     env_file: .env
     environment:
@@ -93,7 +102,20 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
       CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
-      HF_HOME: /models/huggingface
+      HF_HOME: /tmp/huggingface
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR: /models/fastembed-cache
+      PATENTSHIELD_OFFLINE_MODE: "true"
+      PATENTSHIELD_EXTERNAL_SEARCH_ENABLED: "false"
+      PATENTSHIELD_TRANSLATION_ENABLED: "false"
+      PATENTSHIELD_SURVEILLANCE_ENABLED: "false"
+      PATENTSHIELD_CONNECTOR_SYNC_ENABLED: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PATENTSHIELD_BGE_MODEL_PATH: /models/bge-m3
+      PATENTSHIELD_RERANKER_MODEL_PATH: /models/reranker
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY: "true"
+      PATENTSHIELD_MODEL_BUNDLE_MANIFEST: /models/patentshield-model-bundle-manifest.json
     command:
       - celery
       - -A
@@ -106,8 +128,7 @@ services:
       - --max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-25}
       - --loglevel=INFO
     volumes:
-      - ./backend:/app
-      - ml_model_cache:/models/huggingface
+      - ${PATENTSHIELD_INSTALLED_MODELS_DIR:-./offline/installed-models}:/models:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -128,12 +149,8 @@ services:
   # Transformer models are resident per worker process. Keep the embedding
   # queue isolated and single-concurrency by default to avoid host OOM/VRAM spikes.
   embedding_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_ML_DEPS: ${PATENTSHIELD_BUILD_ML_WORKER:-0}
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+    image: ${PATENTSHIELD_BACKEND_IMAGE:?Set PATENTSHIELD_BACKEND_IMAGE to the imported digest-pinned backend image}
+    pull_policy: never
     restart: unless-stopped
     env_file: .env
     environment:
@@ -143,7 +160,20 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/3}
       CHANNELS_REDIS_URL: ${CHANNELS_REDIS_URL:-redis://redis:6379/4}
-      HF_HOME: /models/huggingface
+      HF_HOME: /tmp/huggingface
+      PATENTSHIELD_OFFLINE_MODE: "true"
+      PATENTSHIELD_EXTERNAL_SEARCH_ENABLED: "false"
+      PATENTSHIELD_TRANSLATION_ENABLED: "false"
+      PATENTSHIELD_SURVEILLANCE_ENABLED: "false"
+      PATENTSHIELD_CONNECTOR_SYNC_ENABLED: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PATENTSHIELD_BGE_MODEL_PATH: /models/bge-m3
+      PATENTSHIELD_RERANKER_MODEL_PATH: /models/reranker
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR: /models/fastembed-cache
+      PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY: "true"
+      PATENTSHIELD_MODEL_BUNDLE_MANIFEST: /models/patentshield-model-bundle-manifest.json
     command:
       - celery
       - -A
@@ -156,8 +186,7 @@ services:
       - --max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-10}
       - --loglevel=INFO
     volumes:
-      - ./backend:/app
-      - ml_model_cache:/models/huggingface
+      - ${PATENTSHIELD_INSTALLED_MODELS_DIR:-./offline/installed-models}:/models:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -176,11 +205,8 @@ services:
       start_period: 30s
 
   beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_DEV_DEPS: ${PATENTSHIELD_BUILD_DEV_DEPS:-0}
+    image: ${PATENTSHIELD_BACKEND_IMAGE:?Set PATENTSHIELD_BACKEND_IMAGE to the imported digest-pinned backend image}
+    pull_policy: never
     restart: unless-stopped
     env_file: .env
     environment:
@@ -188,6 +214,14 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/2}
       REDIS_CACHE_URL: ${REDIS_CACHE_URL:-redis://redis:6379/1}
+      PATENTSHIELD_OFFLINE_MODE: "true"
+      PATENTSHIELD_EXTERNAL_SEARCH_ENABLED: "false"
+      PATENTSHIELD_TRANSLATION_ENABLED: "false"
+      PATENTSHIELD_SURVEILLANCE_ENABLED: "false"
+      PATENTSHIELD_CONNECTOR_SYNC_ENABLED: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
     command:
       - celery
       - -A
@@ -195,8 +229,6 @@ services:
       - beat
       - --loglevel=INFO
       - --schedule=/tmp/patentshield-celerybeat-schedule
-    volumes:
-      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -206,4 +238,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  ml_model_cache:

@@ -223,9 +223,27 @@ class BGEEmbedder:
 
                 model_path = str(getattr(settings, "BGE_MODEL_PATH", "")).strip()
                 model_name = str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME))
+                model_revision = str(getattr(settings, "BGE_MODEL_REVISION", "main"))
                 model_source = model_path or model_name
                 if model_path and not os.path.isdir(model_path):
                     raise RuntimeError("Configured PATENTSHIELD_BGE_MODEL_PATH is not a directory.")
+                if bool(getattr(settings, "PATENTSHIELD_OFFLINE_MODE", False)):
+                    from deployment.model_manifest import verify_installed_model
+
+                    manifest_path = str(
+                        getattr(settings, "PATENTSHIELD_MODEL_BUNDLE_MANIFEST", "") or ""
+                    ).strip()
+                    if not model_path or not manifest_path:
+                        raise RuntimeError(
+                            "Air-gapped BGE-M3 requires a local model path and verified bundle manifest."
+                        )
+                    verify_installed_model(
+                        manifest_path,
+                        model_key="bge-m3",
+                        expected_model_id=model_name,
+                        expected_revision=model_revision,
+                        installed_model_dir=model_path,
+                    )
 
                 use_fp16 = bool(getattr(settings, "PATENTSHIELD_BGE_USE_FP16", False))
                 device = str(getattr(settings, "PATENTSHIELD_BGE_DEVICE", "")).strip()

@@ -1,10 +1,17 @@
 # Copy to a protected customer deployment repository and edit every site-specific
 # value. Never place secrets in this file; they belong in runtimeSecret.
 image:
-  repository: registry.internal.example/patentshield
-  digest: "sha256:REPLACE_WITH_APPROVED_64_HEX_IMAGE_DIGEST"
+  repository: registry.internal.example/patentshield-api
+  digest: "sha256:REPLACE_WITH_APPROVED_64_HEX_BACKEND_IMAGE_DIGEST"
   pullSecrets:
     - name: internal-registry-pull
+
+frontend:
+  enabled: true
+  image:
+    repository: registry.internal.example/patentshield-frontend
+    digest: "sha256:REPLACE_WITH_APPROVED_64_HEX_FRONTEND_IMAGE_DIGEST"
+    pullPolicy: IfNotPresent
 
 runtimeSecret: patentshield-runtime
 storage:
@@ -45,3 +52,8 @@ replicas:
   api: 2
   worker: 2
   beat: 1
+
+# Inject the exact commit IDs from model-bundle/manifest.json into the runtime Secret:
+# PATENTSHIELD_BGE_MODEL_REVISION, PATENTSHIELD_RERANKER_MODEL_REVISION,
+# PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_REVISION. Also set:
+# PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR=/models/fastembed-cache

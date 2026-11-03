@@ -12,11 +12,24 @@ replicas:
   api: 2
   worker: 2
   beat: 1
+  frontend: 2
 
 service:
   type: ClusterIP
   port: 8000
   targetPort: 8000
+
+frontend:
+  enabled: true
+  image:
+    repository: registry.example.invalid/patentshield-frontend
+    digest: ""
+    pullPolicy: IfNotPresent
+  service:
+    port: 8080
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
 
 ingress:
   enabled: false
@@ -32,7 +45,7 @@ storage:
 
 modelBundle:
   # Provision these claims out-of-band; the bundle PVC contains manifest.json
-  # and models/{bge-m3,reranker}. The model PVC is mounted read-only by apps.
+  # and models/{bge-m3,reranker,public-patent-embedding}. The model PVC is mounted read-only by apps.
   bundleClaim: patentshield-model-bundle
   modelClaim: patentshield-models
   installJob:
