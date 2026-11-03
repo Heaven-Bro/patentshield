@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-import { ApiError, apiRequest } from "../lib/apiClient";
+import { ApiError, apiRequest, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/multilingual-search";
 const inputClass = "ps-input";
@@ -54,7 +54,7 @@ export default function MultilingualSearch({ tenant }) {
         body: { query: query.trim(), top_n: Number(topN) },
       });
       setQueryMetadata(payload);
-      setResults(payload.results || []);
+      setResults(requireResultsArray(payload, "multilingual search results"));
       setNotice(`Search complete — ${payload.count || 0} source passages returned. Original-language text was preserved.`);
     } catch (searchError) {
       setError(friendlyError(searchError));

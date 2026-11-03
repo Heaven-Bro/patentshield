@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import WorkspaceLayout from "./WorkspaceLayout";
 import ClaimChartWorkspace from "./ClaimChartWorkspace";
-import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
+import { ApiError, apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { useAuthStore } from "../stores/authStore";
 import { useDocumentStore } from "../stores/documentStore";
@@ -209,7 +209,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents, doc
         signal,
       });
       if (useAuthStore.getState().activeTenantId !== tenantId) return;
-      setHistory(Array.isArray(payload.results) ? payload.results : []);
+      setHistory(requireResultsArray(payload, "analysis history"));
     } catch (error) {
       if (error?.name === "AbortError") return;
       if (useAuthStore.getState().activeTenantId !== tenantId) return;
@@ -239,7 +239,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents, doc
       )
         .then((payload) => {
           if (controller.signal.aborted || useAuthStore.getState().activeTenantId !== tenantId) return;
-          const rows = Array.isArray(payload.results) ? payload.results : [];
+          const rows = requireResultsArray(payload, "patent claims");
           setClaims(rows);
           setSelectedClaimId(rows[0]?.id || "");
         })
@@ -606,7 +606,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents, doc
             <span className="text-xs text-slate-500">{history.length} shown</span>
           </div>
           {historyError && <p className="mb-3 rounded-lg bg-rose-50 p-3 text-xs text-rose-700" role="alert">{historyError}</p>}
-          {history.length === 0 && !historyLoading ? (
+          {history.length === 0 && !historyLoading && !historyError ? (
             <p className="rounded-lg border border-dashed border-slate-300 p-5 text-sm text-slate-500">No analyses are recorded for this tenant yet.</p>
           ) : (
             <div className="max-h-64 space-y-2 overflow-auto pr-1">

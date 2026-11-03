@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest } from "../lib/apiClient";
+import { ApiError, apiRequest, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/landscapes";
 function safeHttpsUrl(value) {
@@ -158,7 +158,7 @@ export default function LandscapeAnalytics({ tenant }) {
   const loadStudies = useCallback(async (signal) => {
     const payload = await request(`${API_ROOT}/studies/`, { signal });
     if (signal?.aborted) return;
-    const rows = payload.results || [];
+    const rows = requireResultsArray(payload, "landscape study list");
     setStudies(rows);
     setSelectedStudyId((current) => rows.some((row) => row.id === current) ? current : rows[0]?.id || "");
   }, [request]);
@@ -166,7 +166,7 @@ export default function LandscapeAnalytics({ tenant }) {
   const loadAssignees = useCallback(async (signal) => {
     const payload = await request(`${API_ROOT}/assignees/`, { signal });
     if (signal?.aborted) return;
-    const rows = payload.results || [];
+    const rows = requireResultsArray(payload, "landscape assignee list");
     setAssignees(rows);
     setSelectedAssigneeId((current) => rows.some((row) => row.id === current) ? current : rows[0]?.id || "");
   }, [request]);
@@ -188,8 +188,8 @@ export default function LandscapeAnalytics({ tenant }) {
     if (signal?.aborted) return;
     setStudy(detail);
     setAnalytics(analyticsPayload);
-    setStudyPublications(publicationPayload.results || []);
-    setAnnotations(annotationPayload.results || []);
+    setStudyPublications(requireResultsArray(publicationPayload, "landscape publication list"));
+    setAnnotations(requireResultsArray(annotationPayload, "landscape annotation list"));
     setStudies((current) => current.map((row) => row.id === detail.id ? detail : row));
   }, [request]);
 
@@ -251,9 +251,14 @@ export default function LandscapeAnalytics({ tenant }) {
       });
       setStudyTitle("");
       setStudyDescription("");
+      setStudy(null);
+      setAnalytics(null);
+      setStudyPublications([]);
+      setAnnotations([]);
+      setError("");
       setSelectedStudyId(created.id);
       const payload = await request(`${API_ROOT}/studies/`);
-      setStudies(payload.results || []);
+      setStudies(requireResultsArray(payload, "landscape study list"));
     }, "Landscape study created.");
   }
 
@@ -265,7 +270,7 @@ export default function LandscapeAnalytics({ tenant }) {
       if (jurisdiction.trim()) params.set("jurisdiction", jurisdiction.trim().toUpperCase());
       params.set("limit", "50");
       const payload = await request(`${API_ROOT}/publications/search/?${params.toString()}`);
-      setSearchResults(payload.results || []);
+      setSearchResults(requireResultsArray(payload, "publication search"));
       setSelectedPublicationIds([]);
     }, "Local canonical publication search completed.");
   }
@@ -381,7 +386,7 @@ export default function LandscapeAnalytics({ tenant }) {
             <span className={`rounded-full px-2.5 py-1.5 text-[11px] font-semibold ${study?.status === "READY" ? "bg-emerald-100 text-emerald-800" : study?.status === "FAILED" ? "bg-rose-100 text-rose-800" : study?.status === "BUILDING" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>{study?.status || (loading ? "Loading" : "No study")}</span>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <select className={inputClass} value={selectedStudyId} onChange={(event) => setSelectedStudyId(event.target.value)} aria-label="Selected landscape study">
+            <select className={inputClass} value={selectedStudyId} onChange={(event) => { setStudy(null); setAnalytics(null); setStudyPublications([]); setAnnotations([]); setError(""); setSelectedStudyId(event.target.value); }} aria-label="Selected landscape study">
               <option value="">Select a study…</option>
               {studies.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
             </select>

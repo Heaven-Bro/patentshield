@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import DocumentUploadPanel from "./DocumentUploadPanel";
-import { apiRequest } from "../lib/apiClient";
+import { apiRequest, requireResultsArray } from "../lib/apiClient";
 
 const STATUS_STYLES = {
   UPLOADED: "border-sky-200 bg-sky-50 text-sky-800",
@@ -132,7 +132,7 @@ export default function PatentsDashboard({
     )
       .then((payload) => {
         if (!controller.signal.aborted) {
-          setClaims(Array.isArray(payload.results) ? payload.results : []);
+          setClaims(requireResultsArray(payload, "patent claims"));
         }
       })
       .catch((requestError) => {
@@ -391,9 +391,10 @@ function formatConfidence(value) {
                               {displayStatus(versionStatus)}
                             </span>
                             {latestVersion.page_count ? <span className="tabular-nums">{latestVersion.page_count} pages</span> : null}
+                            {versionStatus === "PENDING" && latestVersion.extraction_queued_at ? <span>Queued {formatDate(latestVersion.extraction_queued_at)}</span> : null}
                           </div>
                         </div>
-                        {canUpload && versionStatus === "FAILED" && (
+                        {canUpload && ["FAILED", "OCR_REQUIRED", "EXTRACTION_FAILED"].includes(versionStatus) && (
                           <button
                             type="button"
                             onClick={() => void retryProcessing(patent, latestVersion)}

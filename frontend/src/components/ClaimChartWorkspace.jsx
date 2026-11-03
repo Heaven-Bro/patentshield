@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
+import { ApiError, apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 import { useDocumentStore } from "../stores/documentStore";
 
 const EDIT_ROLES = new Set(["OWNER", "ADMIN", "ATTORNEY", "ANALYST"]);
@@ -64,7 +64,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         { tenantId },
       );
       if (requestSequence !== chartsRequestSequence.current) return;
-      const nextCharts = Array.isArray(result?.results) ? result.results : [];
+      const nextCharts = requireResultsArray(result, "claim chart list");
       setCharts(nextCharts);
       setChartId((current) => (
         nextCharts.some((item) => item.chart_id === current)
@@ -113,7 +113,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         { tenantId },
       );
       if (requestSequence !== chartRequestSequence.current) return;
-      setRevisions(Array.isArray(history?.results) ? history.results : []);
+      setRevisions(requireResultsArray(history, "claim chart revision history"));
     } catch (loadError) {
       if (requestSequence !== chartRequestSequence.current) return;
       setError(loadError instanceof Error ? loadError.message : "Could not load the claim chart.");
@@ -198,11 +198,22 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
     if (!chart || !tenantId || !canReview) return;
     const draft = drafts[row.row_id] || {};
     const patch = canEdit
-      ? draft
+      ? Object.fromEntries(
+          ["mapping_summary", "attorney_notes", "attorney_decision"]
+            .filter((field) => {
+              const emptyValue = field === "attorney_decision" ? "UNREVIEWED" : "";
+              return (draft[field] ?? emptyValue) !== (row[field] ?? emptyValue);
+            })
+            .map((field) => [field, draft[field]]),
+        )
       : {
           attorney_notes: draft.attorney_notes ?? row.attorney_notes ?? "",
           attorney_decision: draft.attorney_decision || row.attorney_decision || "UNREVIEWED",
         };
+    if (Object.keys(patch).length === 0) {
+      setNotice("There are no row changes to save.");
+      return;
+    }
     setBusy(`row:${row.row_id}`);
     setError("");
     setNotice("");
@@ -218,7 +229,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         `/api/v1/reports/claim-charts/${chart.chart_id}/revisions/`,
         { tenantId },
       );
-      setRevisions(Array.isArray(history?.results) ? history.results : []);
+      setRevisions(requireResultsArray(history, "claim chart revision history"));
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save the limitation mapping.");
     } finally {
@@ -247,7 +258,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
       setNotice(`Claim chart moved to ${formatStatus(nextStatus)}.`);
       await refreshCharts();
       const history = await apiRequest(`/api/v1/reports/claim-charts/${chart.chart_id}/revisions/`, { tenantId });
-      setRevisions(Array.isArray(history?.results) ? history.results : []);
+      setRevisions(requireResultsArray(history, "claim chart revision history"));
     } catch (statusError) {
       setError(statusError instanceof Error ? statusError.message : "Could not update chart status.");
     } finally {

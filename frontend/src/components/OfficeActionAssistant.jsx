@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
+import { ApiError, apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/office-actions";
 const inputClass = "ps-input";
@@ -76,7 +76,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
     try {
       const payload = await request(`${API_ROOT}/?limit=100`, { signal });
       if (signal?.aborted) return;
-      const next = payload.results || [];
+      const next = requireResultsArray(payload, "Office Action list");
       setActions(next);
       setSelectedActionId((current) => next.some((item) => item.id === current) ? current : (next[0]?.id || ""));
     } catch (loadError) {
@@ -92,6 +92,15 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
     return () => controller.abort();
   }, [loadActions]);
 
+  useEffect(() => {
+    setDetail(null);
+    setDrafts([]);
+    setSelectedDraftId("");
+    setDraftContent("");
+    setAmendmentResult(null);
+    setError("");
+  }, [selectedActionId]);
+
   const loadDetail = useCallback(async (actionId, signal) => {
     if (!actionId) { setDetail(null); setDrafts([]); setSelectedDraftId(""); return; }
     try {
@@ -101,7 +110,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
       ]);
       if (signal?.aborted) return;
       setDetail(actionPayload);
-      const nextDrafts = draftPayload.results || [];
+      const nextDrafts = requireResultsArray(draftPayload, "Office Action draft list");
       setDrafts(nextDrafts);
       setSelectedDraftId((current) => nextDrafts.some((draft) => draft.id === current) ? current : (nextDrafts[0]?.id || ""));
     } catch (loadError) {
@@ -279,7 +288,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
           </Card>
 
           <Card title="Uploaded communications" subtitle="Only records in the selected tenant are shown.">
-            {loading ? <div className="space-y-3" role="status" aria-label="Loading prosecution records"><div className="ps-skeleton h-20 w-full" /><div className="ps-skeleton h-20 w-full" /><div className="ps-skeleton h-20 w-11/12" /><span className="sr-only">Loading prosecution records…</span></div> : actions.length === 0 ? <p className="text-sm text-slate-500">No office actions uploaded yet.</p> : (
+            {loading ? <div className="space-y-3" role="status" aria-label="Loading prosecution records"><div className="ps-skeleton h-20 w-full" /><div className="ps-skeleton h-20 w-full" /><div className="ps-skeleton h-20 w-11/12" /><span className="sr-only">Loading prosecution records…</span></div> : actions.length === 0 && !error ? <p className="text-sm text-slate-500">No office actions uploaded yet.</p> : (
               <div className="space-y-2">
                 {actions.map((item) => (
                   <button key={item.id} type="button" onClick={() => setSelectedActionId(item.id)} className={`w-full rounded-xl border p-3 text-left transition ${selectedActionId === item.id ? "border-indigo-300 bg-indigo-50 ring-1 ring-indigo-100" : "border-slate-200 hover:bg-slate-50"}`}>

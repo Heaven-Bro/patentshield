@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiRequest, downloadArtifact } from "../lib/apiClient";
+import { apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 
 const ROOT = "/api/v1/enterprise-auth";
 const MATTER_TYPES = ["patent", "analysis", "claim_chart", "office_action", "fto_study", "product_matter", "landscape_study", "portfolio_valuation"];
@@ -71,11 +71,11 @@ export default function EnterpriseAdminConsole({ tenant, user }) {
       const [providerData, tokenData, policyData, grantData, sessionData] = await Promise.all([
         request("/providers/"), request("/scim-tokens/"), request("/matter-policies/"), request("/matter-grants/"), request("/sessions/"),
       ]);
-      setProviders(providerData.results || []);
-      setTokens(tokenData.results || []);
-      setPolicies(policyData.results || []);
-      setGrants(grantData.results || []);
-      setSessions(sessionData.results || []);
+      setProviders(requireResultsArray(providerData, "identity provider list"));
+      setTokens(requireResultsArray(tokenData, "SCIM token list"));
+      setPolicies(requireResultsArray(policyData, "matter policy list"));
+      setGrants(requireResultsArray(grantData, "matter grant list"));
+      setSessions(requireResultsArray(sessionData, "session list"));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not load enterprise settings.");
     } finally {

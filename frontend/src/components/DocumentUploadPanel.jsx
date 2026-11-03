@@ -59,18 +59,19 @@ export default function DocumentUploadPanel({ tenant, onUploaded }) {
       formRef.current.reset();
       onUploaded?.(response);
     } catch (requestError) {
-      // HTTP 503 can mean the PDF was persisted but the broker was unavailable.
-      // Refresh the library in that case so the failed version remains visible.
+      // These responses include persisted record IDs; refresh the library so
+      // the stored document remains visible instead of encouraging a duplicate upload.
       if (
         requestError instanceof ApiError
-        && requestError.status === 503
+        && [409, 503].includes(requestError.status)
         && requestError.payload?.patent_id
         && requestError.payload?.document_version_id
       ) {
         onUploaded?.(requestError.payload);
-        setError(
-          "The PDF was stored, but ingestion could not be queued. The document is in the library; retry processing after the worker/broker is available.",
-        );
+        formRef.current?.reset();
+        setError(requestError.status === 409
+          ? "The document was stored, but processing was already in progress. The library has been refreshed."
+          : "The PDF was stored, but ingestion could not be queued. The document is in the library; retry processing after the worker/broker is available.");
       } else {
         setError(
           requestError instanceof Error

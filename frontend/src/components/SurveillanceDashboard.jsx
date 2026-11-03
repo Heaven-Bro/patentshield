@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest } from "../lib/apiClient";
+import { ApiError, apiRequest, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/patents/surveillance";
 function safeHttpsUrl(value) {
@@ -111,11 +111,11 @@ export default function SurveillanceDashboard({ tenant }) {
         request(`${API_ROOT}/deliveries/?limit=30`, { signal }),
       ]);
       if (signal?.aborted) return;
-      const nextWatchlists = watchlistPayload.results || [];
+      const nextWatchlists = requireResultsArray(watchlistPayload, "surveillance watchlist");
       setWatchlists(nextWatchlists);
-      setAlerts(alertPayload.results || []);
-      setDestinations(destinationPayload.results || []);
-      setDeliveries(deliveryPayload.results || []);
+      setAlerts(requireResultsArray(alertPayload, "surveillance alert list"));
+      setDestinations(requireResultsArray(destinationPayload, "surveillance destination list"));
+      setDeliveries(requireResultsArray(deliveryPayload, "surveillance delivery list"));
       setSelectedWatchlistId((current) =>
         nextWatchlists.some((item) => item.id === current) ? current : (nextWatchlists[0]?.id || ""),
       );
@@ -128,7 +128,7 @@ export default function SurveillanceDashboard({ tenant }) {
 
   useEffect(() => {
   const controller = new AbortController();
-  
+
   Promise.resolve().then(() => {
     if (!controller.signal.aborted) {
       void loadAll(controller.signal);

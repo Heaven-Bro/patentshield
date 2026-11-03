@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
+import { ApiError, apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/fto";
 
@@ -61,6 +61,19 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
     return { patentId, versionId };
   }, [selectedPatentVersion]);
 
+  const clearStudyContext = () => {
+    setHeatmap(null);
+    setSelectedMatterId("");
+    setSelectedVersionId("");
+    setVersions([]);
+    setFeatures([]);
+    setFeatureSelections({});
+    setEvidenceKinds({});
+    setEvidenceNotes({});
+    setTriage({});
+    setAnnotations({});
+  };
+
   const loadMattersAndStudies = useCallback(async (signal) => {
     setLoading(true);
     setError("");
@@ -70,10 +83,12 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
         apiRequest(`${API_ROOT}/studies/`, { tenantId: tenant.id, signal }),
       ]);
       if (signal?.aborted) return;
-      setMatters(matterPayload.results || []);
-      setStudies(studyPayload.results || []);
-      setSelectedMatterId((current) => current || matterPayload.results?.[0]?.id || "");
-      setSelectedStudyId((current) => current || studyPayload.results?.[0]?.id || "");
+      const nextMatters = requireResultsArray(matterPayload, "FTO product list");
+      const nextStudies = requireResultsArray(studyPayload, "FTO study list");
+      setMatters(nextMatters);
+      setStudies(nextStudies);
+      setSelectedMatterId((current) => current || nextMatters[0]?.id || "");
+      setSelectedStudyId((current) => current || nextStudies[0]?.id || "");
     } catch (loadError) {
       if (loadError?.name !== "AbortError" && !signal?.aborted) setError(displayError(loadError));
     } finally {
@@ -90,7 +105,7 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
     try {
       const payload = await apiRequest(`${API_ROOT}/products/${matterId}/versions/`, { tenantId: tenant.id, signal });
       if (signal?.aborted) return;
-      const rows = payload.results || [];
+      const rows = requireResultsArray(payload, "FTO product-version list");
       setVersions(rows);
       setSelectedVersionId((current) => rows.some((row) => row.id === current) ? current : rows[0]?.id || "");
     } catch (loadError) {
@@ -105,7 +120,7 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
     }
     try {
       const payload = await apiRequest(`${API_ROOT}/versions/${versionId}/features/`, { tenantId: tenant.id, signal });
-      if (!signal?.aborted) setFeatures(payload.results || []);
+      if (!signal?.aborted) setFeatures(requireResultsArray(payload, "FTO feature list"));
     } catch (loadError) {
       if (loadError?.name !== "AbortError" && !signal?.aborted) setError(displayError(loadError));
     }
@@ -116,6 +131,7 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
       setHeatmap(null);
       return;
     }
+    setHeatmap(null);
     try {
       const payload = await apiRequest(`${API_ROOT}/studies/${studyId}/risk-heatmap/`, { tenantId: tenant.id, signal });
       if (!signal?.aborted) {
@@ -233,6 +249,7 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
         },
       });
       await loadMattersAndStudies();
+      clearStudyContext();
       setSelectedStudyId(created.id);
     }, "FTO study created with review-required claim limitation rows.");
   }
@@ -379,7 +396,7 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
           </div>
 
           <div className="ps-panel">
-            <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="ps-panel-title">5. Limitation risk heatmap</h2><p className="mt-1 text-xs leading-5 text-slate-500">Choose a study to inspect limitation-level evidence, counter-evidence and attorney notes.</p></div><label className="min-w-56 text-xs font-semibold text-slate-700">FTO study<select value={selectedStudyId} onChange={(event) => setSelectedStudyId(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"><option value="">Select a study</option>{studies.map((study) => <option key={study.id} value={study.id}>{study.title}</option>)}</select></label></div>
+            <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="ps-panel-title">5. Limitation risk heatmap</h2><p className="mt-1 text-xs leading-5 text-slate-500">Choose a study to inspect limitation-level evidence, counter-evidence and attorney notes.</p></div><label className="min-w-56 text-xs font-semibold text-slate-700">FTO study<select value={selectedStudyId} onChange={(event) => { clearStudyContext(); setError(""); setSelectedStudyId(event.target.value); }} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"><option value="">Select a study</option>{studies.map((study) => <option key={study.id} value={study.id}>{study.title}</option>)}</select></label></div>
             {!heatmap ? <p className="mt-5 rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">Create or select a study to load its limitation heatmap.</p> : <>
               <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">{heatmap.disclaimer}</div>
               <div className="mt-4 flex flex-wrap gap-2 text-[10px] font-bold uppercase tracking-wide"><span className={`rounded-full border px-2 py-1 ${bandClass("HIGH_ATTENTION")}`}>High attention</span><span className={`rounded-full border px-2 py-1 ${bandClass("MODERATE_ATTENTION")}`}>Moderate</span><span className={`rounded-full border px-2 py-1 ${bandClass("ELEVATED_ATTENTION")}`}>Elevated</span><span className={`rounded-full border px-2 py-1 ${bandClass("LOWER_ATTENTION")}`}>Lower attention</span><span className={`rounded-full border px-2 py-1 ${bandClass("UNASSESSED")}`}>Unassessed</span></div>

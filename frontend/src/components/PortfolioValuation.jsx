@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest } from "../lib/apiClient";
+import { ApiError, apiRequest, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/valuation";
 const INPUT = "ps-input";
@@ -77,7 +77,7 @@ export default function PortfolioValuation({ tenant }) {
   const loadStudies = useCallback(async (signal) => {
     const payload = await request(`${API_ROOT}/studies/`, { signal });
     if (signal?.aborted) return;
-    const rows = payload.results || [];
+    const rows = requireResultsArray(payload, "valuation study list");
     setStudies(rows);
     setStudyId((current) => rows.some((row) => row.id === current) ? current : rows[0]?.id || "");
   }, [request]);
@@ -96,12 +96,16 @@ export default function PortfolioValuation({ tenant }) {
     ]);
     if (signal?.aborted) return;
     setStudy(studyPayload);
-    setAssets(assetPayload.results || []);
-    setAssetTotalCount(Number(assetPayload.count ?? (assetPayload.results || []).length));
+    const assetRows = requireResultsArray(assetPayload, "valuation asset list");
+    const scenarioRows = requireResultsArray(scenarioPayload, "valuation scenario list");
+    const diligenceList = requireResultsArray(diligencePayload, "diligence list");
+    const annotationList = requireResultsArray(annotationPayload, "valuation annotation list");
+    setAssets(assetRows);
+    setAssetTotalCount(Number(assetPayload.count ?? assetRows.length));
     setAssetsTruncated(Boolean(assetPayload.truncated));
-    setScenarios(scenarioPayload.results || []);
-    setDiligenceRows(diligencePayload.results || []);
-    setAnnotations(annotationPayload.results || []);
+    setScenarios(scenarioRows);
+    setDiligenceRows(diligenceList);
+    setAnnotations(annotationList);
   }, [request, studyId]);
 
   useEffect(() => {
@@ -140,6 +144,7 @@ export default function PortfolioValuation({ tenant }) {
     await runAction("create-study", async () => {
       const payload = await request(`${API_ROOT}/studies/`, { method: "POST", body: { title, description, currency } });
       setStudies((rows) => [payload, ...rows]);
+      setStudy(null); setAssets([]); setAssetTotalCount(0); setAssetsTruncated(false); setScenarios([]); setDiligenceRows([]); setAnnotations([]);
       setStudyId(payload.id); setTitle(""); setDescription("");
     }, "Valuation study created.");
   }
@@ -149,7 +154,7 @@ export default function PortfolioValuation({ tenant }) {
     await runAction("search", async () => {
       const url = `/api/v1/landscapes/publications/search/?q=${encodeURIComponent(searchQuery)}&limit=50`;
       const payload = await request(url);
-      setSearchResults(payload.results || []);
+      setSearchResults(requireResultsArray(payload, "publication search"));
       setSelectedPublicationIds([]);
     });
   }
@@ -226,7 +231,7 @@ export default function PortfolioValuation({ tenant }) {
             <button className={BUTTON} disabled={!canManagePortfolio || Boolean(busy)} type="submit">{busy === "create-study" ? "Creating…" : "Create study"}</button>
           </form>
           <div className="mt-6 border-t border-slate-200 pt-5">
-            <label className="block text-xs font-semibold text-slate-600">Active study<select value={studyId} onChange={(event) => setStudyId(event.target.value)} className={`${INPUT} mt-1`}><option value="">Select a study</option>{studies.map((row) => <option key={row.id} value={row.id}>{row.title} · {row.currency}</option>)}</select></label>
+            <label className="block text-xs font-semibold text-slate-600">Active study<select value={studyId} onChange={(event) => { setStudy(null); setAssets([]); setAssetTotalCount(0); setAssetsTruncated(false); setScenarios([]); setDiligenceRows([]); setAnnotations([]); setStudyId(event.target.value); }} className={`${INPUT} mt-1`}><option value="">Select a study</option>{studies.map((row) => <option key={row.id} value={row.id}>{row.title} · {row.currency}</option>)}</select></label>
             {selectedStudy && <div className="mt-3 grid grid-cols-2 gap-2"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">Pinned assets</p><p className="mt-1 text-xl font-semibold">{numberLabel(selectedStudy.asset_count)}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">Scenario methods</p><p className="mt-1 text-xl font-semibold">{numberLabel(selectedStudy.scenario_count)}</p></div></div>}
           </div>
         </Section>
