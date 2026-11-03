@@ -131,7 +131,6 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
       setHeatmap(null);
       return;
     }
-    setHeatmap(null);
     try {
       const payload = await apiRequest(`${API_ROOT}/studies/${studyId}/risk-heatmap/`, { tenantId: tenant.id, signal });
       if (!signal?.aborted) {
@@ -173,6 +172,12 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
     void loadHeatmap(selectedStudyId, controller.signal);
     return () => controller.abort();
   }, [loadHeatmap, selectedStudyId]);
+
+  useEffect(() => {
+    if (!selectedStudyId || !["PENDING", "QUEUED", "RUNNING"].includes(heatmap?.study?.matching_status)) return undefined;
+    const timer = window.setInterval(() => { void loadHeatmap(selectedStudyId); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [loadHeatmap, selectedStudyId, heatmap?.study?.matching_status]);
 
   async function runBusy(key, action, successMessage) {
     setBusyKey(key);
@@ -290,6 +295,25 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
     }, "Limitation review recorded.");
   }
 
+  async function refreshCandidateMatches() {
+    if (!selectedStudyId) return;
+    await runBusy("refresh-matches", async () => {
+      await apiRequest(`${API_ROOT}/studies/${selectedStudyId}/candidate-matches/refresh/`, {
+        method: "POST", tenantId: tenant.id, body: {},
+      });
+      await loadHeatmap(selectedStudyId);
+    }, "Candidate matching has been queued.");
+  }
+
+  function selectCandidateMatch(limitation, match) {
+    if (match.feature_review_status !== "CONFIRMED") {
+      setNotice("Review and confirm this product feature in section 3 before linking it as evidence.");
+      return;
+    }
+    setFeatureSelections((current) => ({ ...current, [limitation.assessment_id]: match.feature_id }));
+    setNotice("Confirmed candidate selected. Add your attorney rationale before linking it as evidence.");
+  }
+
   async function resolveAnnotation(annotation) {
     await runBusy(`resolve-${annotation.id}`, async () => {
       await apiRequest(`${API_ROOT}/annotations/${annotation.id}/resolve/`, {
@@ -398,7 +422,11 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
           <div className="ps-panel">
             <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="ps-panel-title">5. Limitation risk heatmap</h2><p className="mt-1 text-xs leading-5 text-slate-500">Choose a study to inspect limitation-level evidence, counter-evidence and attorney notes.</p></div><label className="min-w-56 text-xs font-semibold text-slate-700">FTO study<select value={selectedStudyId} onChange={(event) => { clearStudyContext(); setError(""); setSelectedStudyId(event.target.value); }} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"><option value="">Select a study</option>{studies.map((study) => <option key={study.id} value={study.id}>{study.title}</option>)}</select></label></div>
             {!heatmap ? <p className="mt-5 rounded-xl border border-dashed border-slate-300 p-5 text-sm text-slate-500">Create or select a study to load its limitation heatmap.</p> : <>
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">{heatmap.disclaimer}</div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
+                <div><p className="text-xs font-bold uppercase tracking-wide text-indigo-950">Candidate matching: {statusLabel(heatmap.study?.matching_status || "PENDING")}</p><p className="mt-1 text-xs leading-5 text-indigo-900">Explainable lexical retrieval suggestions. No suggestion changes attorney triage or review state.</p>{heatmap.study?.matching_error_code && <p className="mt-1 text-xs text-rose-700">Processing issue: {heatmap.study.matching_error_code}</p>}</div>
+                <button type="button" onClick={() => void refreshCandidateMatches()} disabled={busyKey === "refresh-matches" || ["QUEUED", "RUNNING"].includes(heatmap.study?.matching_status)} className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-semibold text-indigo-800 disabled:opacity-50">{busyKey === "refresh-matches" ? "Queueing…" : "Refresh suggestions"}</button>
+              </div>
+              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-950">{heatmap.disclaimer}<br /><span className="font-semibold">{heatmap.candidate_match_disclaimer}</span></div>
               <div className="mt-4 flex flex-wrap gap-2 text-[10px] font-bold uppercase tracking-wide"><span className={`rounded-full border px-2 py-1 ${bandClass("HIGH_ATTENTION")}`}>High attention</span><span className={`rounded-full border px-2 py-1 ${bandClass("MODERATE_ATTENTION")}`}>Moderate</span><span className={`rounded-full border px-2 py-1 ${bandClass("ELEVATED_ATTENTION")}`}>Elevated</span><span className={`rounded-full border px-2 py-1 ${bandClass("LOWER_ATTENTION")}`}>Lower attention</span><span className={`rounded-full border px-2 py-1 ${bandClass("UNASSESSED")}`}>Unassessed</span></div>
               {allHeatmapRows.length === 0 ? <p className="mt-4 text-sm text-slate-500">No claim limitations are attached to this study.</p> : <>
                 <div className="mt-4 space-y-3" aria-label="Claim limitation review-priority heatmap">
@@ -411,6 +439,13 @@ export default function FTOWorkspace({ tenant, patents = [] }) {
                   <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-800">Link confirmed product evidence</p><select value={featureSelections[limitation.assessment_id] || ""} onChange={(event) => setFeatureSelections((current) => ({ ...current, [limitation.assessment_id]: event.target.value }))} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"><option value="">Select a confirmed feature</option>{currentFeatures.map((feature) => <option key={feature.id} value={feature.id}>P{(feature.source_page_index ?? 0) + 1} · {feature.title}</option>)}</select><select value={evidenceKinds[limitation.assessment_id] || "SUPPORTING"} onChange={(event) => setEvidenceKinds((current) => ({ ...current, [limitation.assessment_id]: event.target.value }))} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"><option value="SUPPORTING">Potentially supports correspondence</option><option value="COUNTER">Potentially counters correspondence</option><option value="CONTEXT">Context only</option></select><textarea value={evidenceNotes[limitation.assessment_id] || ""} onChange={(event) => setEvidenceNotes((current) => ({ ...current, [limitation.assessment_id]: event.target.value }))} rows={2} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs" placeholder="Why is this source feature relevant?" /><button type="button" onClick={() => void linkEvidence(limitation)} disabled={!featureSelections[limitation.assessment_id] || busyKey === `evidence-${limitation.assessment_id}`} className="mt-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Link evidence</button></div>
                   <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-800">Attorney triage</p><select value={triage[limitation.assessment_id]?.status || limitation.triage_status} onChange={(event) => setTriage((current) => ({ ...current, [limitation.assessment_id]: { ...current[limitation.assessment_id], status: event.target.value } }))} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs">{["UNASSESSED", "POTENTIAL_MATCH", "PARTIAL_MATCH", "NO_MATCH_IDENTIFIED", "COUNTER_EVIDENCE_PRESENT", "CONFLICTING_EVIDENCE", "UNCERTAIN"].map((value) => <option key={value} value={value}>{statusLabel(value)}</option>)}</select><textarea value={triage[limitation.assessment_id]?.rationale ?? limitation.triage_rationale ?? ""} onChange={(event) => setTriage((current) => ({ ...current, [limitation.assessment_id]: { ...current[limitation.assessment_id], rationale: event.target.value } }))} rows={2} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs" placeholder="Explain the evidence and any limits of the reviewed scope." /><button type="button" onClick={() => void saveTriage(limitation)} disabled={busyKey === `triage-${limitation.assessment_id}`} className="mt-2 rounded-lg bg-indigo-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Save triage</button><p className="mt-2 text-[10px] text-slate-500">Review state: {statusLabel(limitation.review_status)}. Independent review is restricted by the backend.</p></div>
                 </div>
+              {Array.isArray(limitation.candidate_matches) && limitation.candidate_matches.length > 0 && <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50/50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-bold text-indigo-950">Suggested product-feature candidates</p><span className="text-[10px] text-indigo-800">Lexical score · not a legal conclusion</span></div>
+                <div className="mt-2 space-y-2">{limitation.candidate_matches.slice(0, 5).map((match) => <div key={match.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-100 bg-white p-2.5">
+                  <div className="min-w-0 flex-1"><p className="text-xs font-semibold text-slate-800">{match.feature_title}</p><p className="mt-1 text-[10px] text-slate-500">Score {(match.score * 100).toFixed(1)}% · limitation coverage {(match.limitation_coverage * 100).toFixed(1)}% · {statusLabel(match.feature_review_status)}</p><p className="mt-1 text-[10px] text-indigo-700">Shared terms: {(match.matched_terms || []).join(", ") || "—"}</p><p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-600">{match.source_quote}</p></div>
+                  {match.feature_review_status === "CONFIRMED" ? <button type="button" onClick={() => selectCandidateMatch(limitation, match)} className="rounded-lg bg-indigo-700 px-2.5 py-2 text-[10px] font-semibold text-white">Select feature</button> : <span className="rounded-lg bg-amber-100 px-2.5 py-2 text-[10px] font-semibold text-amber-900">Confirm in section 3</span>}
+                </div>)}</div>
+              </div>}
               {Array.isArray(limitation.evidence) && limitation.evidence.length > 0 && <div className="mt-4 space-y-2">{limitation.evidence.map((evidence) => <div key={evidence.id} className="rounded-lg border border-slate-200 bg-white p-3"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${evidence.kind === "SUPPORTING" ? "bg-emerald-100 text-emerald-800" : evidence.kind === "COUNTER" ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-700"}`}>{statusLabel(evidence.kind)}</span><span className="text-[10px] text-slate-500">Page {(evidence.source_page_index ?? 0) + 1} · {evidence.feature_title}</span></div><blockquote className="mt-2 border-l-2 border-indigo-300 pl-3 text-xs leading-5 text-slate-700">“{evidence.source_quote}”</blockquote>{evidence.attorney_rationale && <p className="mt-2 text-xs text-slate-600">{evidence.attorney_rationale}</p>}</div>)}</div>}
                 {Array.isArray(limitation.annotations) && limitation.annotations.length > 0 && <div className="mt-3 space-y-2">{limitation.annotations.map((annotation) => <div key={annotation.id} className={`rounded-lg border p-3 ${annotation.resolved ? "border-slate-200 bg-slate-50" : "border-violet-200 bg-violet-50/50"}`}><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-600">{statusLabel(annotation.category)} · {annotation.created_by_username || "Tenant member"} · {annotation.resolved ? "resolved" : "open"}</p><button type="button" onClick={() => void resolveAnnotation(annotation)} disabled={busyKey === `resolve-${annotation.id}`} className="text-[10px] font-semibold text-indigo-700 underline disabled:opacity-50">{annotation.resolved ? "Reopen" : "Resolve"}</button></div><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-700">{annotation.body}</p></div>)}</div>}
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><div className="flex flex-1 flex-col gap-2 sm:flex-row"><input value={annotations[limitation.assessment_id] || ""} onChange={(event) => setAnnotations((current) => ({ ...current, [limitation.assessment_id]: event.target.value }))} className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs" placeholder="Add an attorney note, question, or counter-evidence context" /><button type="button" onClick={() => void addAnnotation(limitation)} disabled={!annotations[limitation.assessment_id]?.trim() || busyKey === `annotation-${limitation.assessment_id}`} className="ps-button-secondary !px-3 !py-2">Add annotation</button></div>{limitation.review_status !== "REVIEWED" && <button type="button" onClick={() => void markLimitationReviewed(limitation)} disabled={busyKey === `review-${limitation.assessment_id}`} className="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-3.5 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">Mark reviewed</button>}</div>

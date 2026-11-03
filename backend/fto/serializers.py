@@ -6,6 +6,7 @@ from rest_framework import serializers
 from fto.models import (
     AttorneyAnnotation,
     FTOStudy,
+    FTOCandidateMatch,
     LimitationAssessment,
     LimitationEvidence,
     ProductFeature,
@@ -128,7 +129,9 @@ class FTOStudySerializer(serializers.ModelSerializer):
             "id", "title", "product_id", "product_version_id", "product_name", "product_version_number",
             "patent_id", "patent_title", "publication_number", "patent_document_version_id", "jurisdiction",
             "selected_claim_ids", "status", "limitation_count", "reviewed_count",
-            "created_by_id", "reviewed_by_id", "reviewed_at", "created_at", "updated_at",
+            "created_by_id", "reviewed_by_id", "reviewed_at",
+            "matching_status", "matching_queued_at", "matching_started_at",
+            "matching_completed_at", "matching_error_code", "created_at", "updated_at",
         )
         read_only_fields = fields
 
@@ -243,5 +246,30 @@ class AttorneyAnnotationSerializer(serializers.ModelSerializer):
         fields = (
             "id", "assessment_id", "category", "body", "created_by_id",
             "created_by_username", "resolved", "resolved_by_id", "resolved_at", "created_at",
+        )
+        read_only_fields = fields
+
+
+class FTOCandidateMatchSerializer(serializers.ModelSerializer):
+    assessment_id = serializers.UUIDField(read_only=True)
+    feature_id = serializers.UUIDField(read_only=True)
+    claim_number = serializers.CharField(source="assessment.limitation.claim.claim_number", read_only=True)
+    limitation_text = serializers.CharField(source="assessment.limitation.limitation_text", read_only=True)
+    feature_title = serializers.CharField(source="feature_title_snapshot", read_only=True)
+    feature_review_status = serializers.CharField(source="feature.review_status", read_only=True)
+    feature_review_status_at_match = serializers.CharField(source="feature_review_status_snapshot", read_only=True)
+    source_quote = serializers.CharField(source="source_quote_snapshot", read_only=True)
+    source_page_index = serializers.IntegerField(source="source_page_index_snapshot", read_only=True, allow_null=True)
+    source_start_offset = serializers.IntegerField(source="source_start_offset_snapshot", read_only=True, allow_null=True)
+    source_end_offset = serializers.IntegerField(source="source_end_offset_snapshot", read_only=True, allow_null=True)
+
+    class Meta:
+        model = FTOCandidateMatch
+        fields = (
+            "id", "assessment_id", "feature_id", "claim_number", "limitation_text",
+            "feature_title", "feature_review_status", "feature_review_status_at_match",
+            "source_quote", "source_page_index", "source_start_offset", "source_end_offset",
+            "algorithm_version", "score", "limitation_coverage", "matched_terms",
+            "rationale", "created_at",
         )
         read_only_fields = fields

@@ -178,3 +178,96 @@ def audit_fto_event(*, tenant, actor, action: str, resource_type: str, resource_
     except Exception:
         # Audit failure must not make an already-committed workflow look failed.
         logger.exception("FTO audit write failed (action=%s, resource_type=%s).", action, resource_type)
+
+
+# Kept deliberately small and versioned: this is a transparent lexical candidate
+# generator, not semantic claim construction or a legal opinion.
+_MATCH_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "by", "with",
+    "from", "at", "as", "is", "are", "was", "were", "be", "being", "been",
+    "comprising", "comprise", "comprises", "wherein", "whereby", "thereof", "therein",
+    "said", "such", "each", "one", "more", "at", "least", "plurality", "configured",
+    "adapted", "according", "claim", "claims", "feature", "features",
+})
+_MATCH_TOKEN = re.compile(r"[^\W_]{2,}", re.UNICODE)
+
+
+def _match_tokens(value: str) -> set[str]:
+    return {
+        token for token in _MATCH_TOKEN.findall((value or "").casefold())
+        if token not in _MATCH_STOP_WORDS and len(token) <= 48
+    }
+
+
+def rank_product_features_for_limitation(
+    limitation_text: str,
+    features: Iterable[object],
+    *,
+    max_results: int = 10,
+) -> list[dict]:
+    """Rank source features by weighted lexical overlap with a claim limitation.
+
+    Scores are a deterministic retrieval aid (weighted F1), not a probability,
+    claim construction, element-by-element comparison, infringement opinion, or
+    absence-of-feature conclusion. Product feature source quotations are retained
+    by the caller and must be reviewed before they can be linked as evidence.
+    """
+    if not isinstance(max_results, int) or max_results < 1 or max_results > 50:
+        raise ValueError("max_results must be between 1 and 50")
+    limitation_terms = _match_tokens(limitation_text)
+    if not limitation_terms:
+        return []
+
+    feature_rows = []
+    document_frequency: dict[str, int] = {}
+    for feature in features:
+        text = " ".join((
+            str(getattr(feature, "title", "") or ""),
+            str(getattr(feature, "description", "") or ""),
+            str(getattr(feature, "source_quote", "") or ""),
+        ))
+        terms = _match_tokens(text)
+        if not terms:
+            continue
+        feature_rows.append((feature, terms))
+        for token in terms:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+    if not feature_rows:
+        return []
+
+    from math import log
+
+    total_docs = len(feature_rows)
+    def weight(token: str) -> float:
+        # Smoothed inverse feature frequency makes rare technical terms more
+        # informative without allowing a token to have an unbounded weight.
+        return 1.0 + log((total_docs + 1.0) / (document_frequency.get(token, 0) + 1.0))
+
+    query_weight = sum(weight(token) for token in limitation_terms)
+    ranked: list[dict] = []
+    for feature, feature_terms in feature_rows:
+        overlap = limitation_terms & feature_terms
+        if not overlap:
+            continue
+        overlap_weight = sum(weight(token) for token in overlap)
+        feature_weight = sum(weight(token) for token in feature_terms)
+        precision = overlap_weight / feature_weight if feature_weight else 0.0
+        coverage = overlap_weight / query_weight if query_weight else 0.0
+        score = (2.0 * precision * coverage / (precision + coverage)) if (precision + coverage) else 0.0
+        matched_terms = sorted(overlap, key=lambda token: (-weight(token), token))[:20]
+        if score <= 0.0:
+            continue
+        ranked.append({
+            "feature": feature,
+            "score": round(min(1.0, max(0.0, score)), 6),
+            "limitation_coverage": round(min(1.0, max(0.0, coverage)), 6),
+            "matched_terms": matched_terms,
+            "rationale": (
+                "Lexical retrieval candidate based on shared terms: "
+                + ", ".join(matched_terms)
+                + ". This ranking is not an element-by-element claim analysis or legal conclusion."
+            ),
+        })
+    ranked.sort(key=lambda row: (-row["score"], -row["limitation_coverage"], str(getattr(row["feature"], "pk", ""))))
+    return ranked[:max_results]

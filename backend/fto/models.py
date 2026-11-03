@@ -130,6 +130,13 @@ class ProductFeature(TenantScopedModel):
 class FTOStudy(TenantScopedModel):
     """A version-pinned product-to-patent assessment workspace."""
 
+    class MatchingStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Running"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
+
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
         IN_PROGRESS = "IN_PROGRESS", "In progress"
@@ -148,12 +155,22 @@ class FTOStudy(TenantScopedModel):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="fto_studies_created")
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="fto_studies_reviewed", null=True, blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    matching_status = models.CharField(max_length=12, choices=MatchingStatus.choices, default=MatchingStatus.PENDING, db_index=True)
+    matching_task_id = models.CharField(max_length=64, blank=True, default="")
+    matching_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="fto_match_jobs_requested", null=True, blank=True)
+    matching_queued_at = models.DateTimeField(null=True, blank=True)
+    matching_started_at = models.DateTimeField(null=True, blank=True)
+    matching_completed_at = models.DateTimeField(null=True, blank=True)
+    matching_error_code = models.CharField(max_length=80, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("-updated_at",)
-        indexes = [models.Index(fields=("tenant", "status", "-updated_at"), name="fto_study_tenant_status_idx")]
+        indexes = [
+            models.Index(fields=("tenant", "status", "-updated_at"), name="fto_study_tenant_status_idx"),
+            models.Index(fields=("tenant", "matching_status", "matching_queued_at"), name="fto_match_state_queued_idx"),
+        ]
 
     def clean(self):
         if self.product_version_id and self.tenant_id and self.product_version.tenant_id != self.tenant_id:
@@ -250,6 +267,47 @@ class LimitationAssessment(TenantScopedModel):
 
     def __str__(self) -> str:
         return f"Assessment for {self.limitation}"
+
+
+class FTOCandidateMatch(TenantScopedModel):
+    """Explainable lexical candidate suggestion; never an attorney/legal finding."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    study = models.ForeignKey(FTOStudy, on_delete=models.PROTECT, related_name="candidate_matches")
+    assessment = models.ForeignKey(LimitationAssessment, on_delete=models.PROTECT, related_name="candidate_matches")
+    feature = models.ForeignKey(ProductFeature, on_delete=models.PROTECT, related_name="fto_candidate_matches")
+    algorithm_version = models.CharField(max_length=40, default="LEXICAL_OVERLAP_V1")
+    feature_title_snapshot = models.CharField(max_length=240)
+    feature_review_status_snapshot = models.CharField(max_length=12)
+    source_quote_snapshot = models.TextField()
+    source_page_index_snapshot = models.PositiveIntegerField(null=True, blank=True)
+    source_start_offset_snapshot = models.PositiveIntegerField(null=True, blank=True)
+    source_end_offset_snapshot = models.PositiveIntegerField(null=True, blank=True)
+    score = models.FloatField()
+    limitation_coverage = models.FloatField()
+    matched_terms = models.JSONField(default=list, blank=True)
+    rationale = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("assessment_id", "-score", "feature_id")
+        constraints = [
+            models.UniqueConstraint(fields=("assessment", "feature", "algorithm_version"), name="fto_candidate_match_uniq"),
+            models.CheckConstraint(condition=Q(score__gte=0.0) & Q(score__lte=1.0), name="fto_candidate_score_ck"),
+            models.CheckConstraint(condition=Q(limitation_coverage__gte=0.0) & Q(limitation_coverage__lte=1.0), name="fto_candidate_coverage_ck"),
+        ]
+        indexes = [
+            models.Index(fields=("tenant", "study", "assessment"), name="fto_candidate_study_idx"),
+            models.Index(fields=("tenant", "study", "-score"), name="fto_candidate_score_idx"),
+        ]
+
+    def clean(self):
+        if self.study_id and self.assessment_id:
+            if self.study_id != self.assessment.study_id or self.tenant_id != self.study.tenant_id:
+                raise ValidationError("Candidate match, assessment, and study must share a tenant and study.")
+        if self.study_id and self.feature_id:
+            if self.feature.tenant_id != self.tenant_id or self.feature.product_version_id != self.study.product_version_id:
+                raise ValidationError("Candidate feature must belong to the study's product version and tenant.")
 
 
 class LimitationEvidence(TenantScopedModel):

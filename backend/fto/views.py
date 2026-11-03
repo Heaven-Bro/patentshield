@@ -26,6 +26,7 @@ from audit.models import AuditLog
 from fto.models import (
     AttorneyAnnotation,
     FTOStudy,
+    FTOCandidateMatch,
     LimitationAssessment,
     LimitationEvidence,
     ProductFeature,
@@ -38,6 +39,7 @@ from fto.serializers import (
     AttorneyAnnotationSerializer,
     FTOStudyCreateSerializer,
     FTOStudySerializer,
+    FTOCandidateMatchSerializer,
     LimitationAssessmentSerializer,
     LimitationEvidenceCreateSerializer,
     LimitationEvidenceSerializer,
@@ -48,7 +50,7 @@ from fto.serializers import (
     ProductVersionSerializer,
 )
 from fto.services import audit_fto_event, split_claim_limitations
-from fto.tasks import process_product_version
+from fto.tasks import enqueue_fto_candidate_match_generation, process_product_version
 from enterprise_identity.services import filter_visible_matter_queryset, require_matter_access
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import Tenant, TenantMembership
@@ -450,6 +452,9 @@ class FTOStudyListCreateView(FTOAPIView):
                         triage_status=LimitationAssessment.TriageStatus.UNASSESSED,
                     )
                     assessment_count += 1
+        transaction.on_commit(
+            lambda study_id=str(study.pk), tenant_id=str(tenant.pk), requester_id=str(request.user.pk): enqueue_fto_candidate_match_generation(study_id, tenant_id, requested_by_id=requester_id)
+        )
         audit_fto_event(tenant=tenant, actor=request.user, action="FTO_STUDY_CREATED", resource_type="FTOStudy", resource_id=study.pk, metadata={"product_version_id": str(product_version.pk), "patent_id": str(patent.pk), "patent_document_version_id": str(patent_version.pk), "claim_count": len(claims), "limitation_assessment_count": assessment_count})
         study = FTOStudy.objects.select_related("product_version__product", "patent", "patent_document_version").get(pk=study.pk)
         study.limitation_count = assessment_count
@@ -496,6 +501,24 @@ class FTOStudyDetailView(FTOAPIView):
         return self.get(request, study_id)
 
 
+class FTOCandidateMatchRefreshView(FTOAPIView):
+    """Explicitly rebuild candidate suggestions after feature-set changes."""
+
+    def post(self, request: Request, study_id) -> Response:
+        tenant = self.tenant(request)
+        _require_role(request, _EDITOR_ROLES, "Your tenant role cannot refresh FTO candidate matching.")
+        study = self.study(request, study_id)
+        require_matter_access(request=request, matter_type="fto_study", matter_id=study.pk, required="EDIT")
+        task_id = enqueue_fto_candidate_match_generation(str(study.pk), str(tenant.pk), force=True, requested_by_id=str(request.user.pk))
+        refreshed = FTOStudy.objects.for_tenant(tenant.pk).get(pk=study.pk)
+        if task_id:
+            audit_fto_event(tenant=tenant, actor=request.user, action="FTO_CANDIDATE_MATCH_REFRESHED", resource_type="FTOStudy", resource_id=study.pk, metadata={"task_id": task_id})
+            return Response(FTOStudySerializer(refreshed).data, status=status.HTTP_202_ACCEPTED)
+        if refreshed.matching_status in {FTOStudy.MatchingStatus.QUEUED, FTOStudy.MatchingStatus.RUNNING}:
+            return Response(FTOStudySerializer(refreshed).data, status=status.HTTP_202_ACCEPTED)
+        return Response(FTOStudySerializer(refreshed).data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
 class FTOStudyHeatmapView(FTOAPIView):
     def get(self, request: Request, study_id) -> Response:
         study = self.study(request, study_id)
@@ -536,6 +559,21 @@ class FTOStudyHeatmapView(FTOAPIView):
             annotations_by_assessment.setdefault(str(annotation_row.assessment_id), []).append(
                 AttorneyAnnotationSerializer(annotation_row).data
             )
+        candidate_matches_by_assessment: dict[str, list[dict]] = {}
+        candidate_match_rows = FTOCandidateMatch.objects.for_tenant(tenant_id).filter(
+            study=study,
+            assessment__tenant_id=tenant_id,
+            assessment__study_id=study.pk,
+            assessment__limitation__tenant_id=tenant_id,
+            feature__tenant_id=tenant_id,
+            feature__product_version_id=study.product_version_id,
+            feature__product_version__product__tenant_id=tenant_id,
+        ).select_related("assessment__limitation__claim", "feature").order_by("assessment_id", "-score", "feature_id")[:3000]
+        for match in candidate_match_rows:
+            candidate_matches_by_assessment.setdefault(str(match.assessment_id), []).append(
+                FTOCandidateMatchSerializer(match).data
+            )
+
         grouped: dict[str, dict] = {}
         for row in serialized:
             limitation = row["limitation"]
@@ -556,11 +594,13 @@ class FTOStudyHeatmapView(FTOAPIView):
                 "triage_rationale": row["triage_rationale"],
                 "evidence": evidence_by_assessment.get(str(row["id"]), []),
                 "annotations": annotations_by_assessment.get(str(row["id"]), []),
+                "candidate_matches": candidate_matches_by_assessment.get(str(row["id"]), []),
             })
         return Response({
             "study": FTOStudySerializer(study).data,
             "disclaimer": "Heatmap bands prioritize attorney review only. They are not findings of infringement, validity, or freedom to operate; 'no feature identified' is not proof that a feature is absent from the product.",
             "risk_bands": {"HIGH_ATTENTION": "Potential correspondence or conflicting source evidence; prioritize review.", "MODERATE_ATTENTION": "Partial correspondence or counter-evidence requires context.", "ELEVATED_ATTENTION": "Uncertainty requires further evidence or specialist review.", "LOWER_ATTENTION": "No feature identified in the reviewed specification scope; this does not establish product absence.", "UNASSESSED": "No attorney triage status has been selected."},
+            "candidate_match_disclaimer": "Candidate rankings use lexical overlap only. They are retrieval suggestions, not claim construction, element-by-element analysis, infringement findings, or legal advice. Review original source documents before recording evidence. Each run examines at most 500 non-rejected product features; features outside that cap are not ranked and may include relevant material.",
             "claims": list(grouped.values()),
         })
 

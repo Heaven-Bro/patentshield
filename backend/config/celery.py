@@ -32,6 +32,8 @@ app.conf.update(
         "reports.claim_chart_tasks.*": {"queue": "exports"},
         "patents.surveillance_tasks.*": {"queue": "external_search"},
         "office_actions.tasks.*": {"queue": "analysis"},
+        "fto.tasks.generate_fto_candidate_matches": {"queue": "analysis"},
+        "fto.tasks.recover_stale_fto_candidate_matches": {"queue": "analysis"},
         "fto.tasks.*": {"queue": "ingestion"},
         "landscapes.tasks.*": {"queue": "embedding"},
     },
@@ -66,6 +68,11 @@ app.conf.update(
         },
         "recover-stale-office-action-extractions": {
             "task": "office_actions.tasks.recover_stale_office_action_extractions",
+            "schedule": 300.0,
+            "options": {"queue": "analysis"},
+        },
+        "recover-stale-fto-candidate-matches": {
+            "task": "fto.tasks.recover_stale_fto_candidate_matches",
             "schedule": 300.0,
             "options": {"queue": "analysis"},
         },

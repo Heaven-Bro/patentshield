@@ -1,6 +1,9 @@
 """Tests for Unicode language detection and original-language lexical tokenization."""
 
-from django.test import SimpleTestCase
+from types import ModuleType
+from unittest.mock import patch
+
+from django.test import SimpleTestCase, override_settings
 
 from indexing.language import detect_language, detect_language_code, tokenize_original_language
 from indexing.services import BGEEmbedder, BM25LexicalIndex, HybridChunker
@@ -72,3 +75,80 @@ class CJKLanguageDetectionTests(SimpleTestCase):
     def test_existing_embedder_is_the_multilingual_bge_m3_model(self):
         self.assertEqual(BGEEmbedder.MODEL_NAME, "BAAI/bge-m3")
         self.assertEqual(BGEEmbedder.DIMENSIONS, 1024)
+
+
+class FlagEmbeddingAdapterTests(SimpleTestCase):
+    def setUp(self):
+        self._original_state = (
+            BGEEmbedder._model,
+            BGEEmbedder._load_attempted,
+            BGEEmbedder._load_error,
+        )
+        BGEEmbedder._model = None
+        BGEEmbedder._load_attempted = False
+        BGEEmbedder._load_error = None
+
+    def tearDown(self):
+        (
+            BGEEmbedder._model,
+            BGEEmbedder._load_attempted,
+            BGEEmbedder._load_error,
+        ) = self._original_state
+
+    def test_loads_local_bge_m3_path_but_persists_canonical_model_identity(self):
+        calls = {}
+
+        class FakeBGEModel:
+            def __init__(self, model_name_or_path, **kwargs):
+                calls["model_source"] = model_name_or_path
+                calls["kwargs"] = kwargs
+
+            def encode(self, texts, **kwargs):
+                calls["encode_kwargs"] = kwargs
+                return {"dense_vecs": [[1.0] + [0.0] * 1023 for _ in texts]}
+
+        fake_module = ModuleType("FlagEmbedding")
+        fake_module.BGEM3FlagModel = FakeBGEModel
+        with (
+            override_settings(
+                BGE_MODEL_NAME="BAAI/bge-m3",
+                BGE_MODEL_PATH="/models/bge-m3",
+                BGE_MODEL_REVISION="release-2026-10",
+                BGE_BATCH_SIZE=8,
+                PATENTSHIELD_BGE_MAX_LENGTH=8192,
+                PATENTSHIELD_BGE_USE_FP16=False,
+                PATENTSHIELD_BGE_DEVICE="cpu",
+                PATENTSHIELD_MODEL_CACHE_DIR="",
+            ),
+            patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
+            patch("indexing.services.os.path.isdir", return_value=True),
+        ):
+            vectors = BGEEmbedder.embed_texts(["无线通信专利"])
+            model_identity = BGEEmbedder.model_identity()
+
+        self.assertEqual(calls["model_source"], "/models/bge-m3")
+        self.assertEqual(calls["kwargs"]["devices"], ["cpu"])
+        self.assertEqual(calls["kwargs"]["trust_remote_code"], False)
+        self.assertEqual(calls["encode_kwargs"]["return_sparse"], False)
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(len(vectors[0]), 1024)
+        self.assertEqual(model_identity, ("BAAI/bge-m3", "release-2026-10"))
+
+    def test_rejects_wrong_dense_dimension(self):
+        class FakeBGEModel:
+            def encode(self, texts, **kwargs):
+                return {"dense_vecs": [[0.5, 0.5] for _ in texts]}
+
+        BGEEmbedder._model = FakeBGEModel()
+        with self.assertRaisesRegex(RuntimeError, "1024-dimensional"):
+            BGEEmbedder.embed_texts(["patent claim text"])
+
+    def test_inference_failure_never_degrades_to_mock_vectors(self):
+        class BrokenBGEModel:
+            def encode(self, texts, **kwargs):
+                raise ValueError("model runtime failure")
+
+        BGEEmbedder._model = BrokenBGEModel()
+        with override_settings(PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS=True):
+            with self.assertRaisesRegex(ValueError, "model runtime failure"):
+                BGEEmbedder.embed_texts(["patent claim text"])

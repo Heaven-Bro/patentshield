@@ -1,15 +1,16 @@
 """FTO workflow tests: source provenance, limitation mapping, and tenant isolation."""
 from __future__ import annotations
 
-from urllib import response
 import uuid
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from unittest.mock import patch
 from rest_framework.test import APIClient
 
 from fto.models import (
     FTOStudy,
+    FTOCandidateMatch,
     LimitationAssessment,
     LimitationEvidence,
     ProductFeature,
@@ -17,7 +18,8 @@ from fto.models import (
     ProductVersion,
     StudyClaimLimitation,
 )
-from fto.services import decompose_product_specification, split_claim_limitations
+from fto.services import decompose_product_specification, rank_product_features_for_limitation, split_claim_limitations
+from fto.tasks import enqueue_fto_candidate_match_generation
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import Tenant, TenantMembership
 
@@ -46,6 +48,35 @@ class FTOServiceTests(TestCase):
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0][2], source)
         self.assertEqual(segments[0][3], "WHOLE_CLAIM_UNSPLIT")
+
+    def test_candidate_ranking_prefers_shared_technical_terms_and_is_bounded(self):
+        from types import SimpleNamespace
+
+        features = [
+            SimpleNamespace(pk="feature-a", title="Sensor processor", description="Receives sensor data and transmits readings", source_quote="A sensor processor transmits readings."),
+            SimpleNamespace(pk="feature-b", title="Battery housing", description="Mechanical enclosure and connector", source_quote="A housing contains a connector."),
+        ]
+        ranked = rank_product_features_for_limitation(
+            "A processor receives sensor data and transmits a control signal",
+            features,
+            max_results=10,
+        )
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["feature"].pk, "feature-a")
+        self.assertGreater(ranked[0]["score"], 0)
+        self.assertGreater(ranked[0]["limitation_coverage"], 0)
+        self.assertIn("sensor", ranked[0]["matched_terms"])
+        self.assertIn("not an element-by-element", ranked[0]["rationale"])
+
+    def test_candidate_ranking_does_not_invent_matches_for_stopwords_only(self):
+        from types import SimpleNamespace
+
+        feature = SimpleNamespace(pk="feature-a", title="A device", description="The system is configured", source_quote="A system comprising components.")
+        self.assertEqual(rank_product_features_for_limitation("A device comprising the system", [feature]), [])
+
+    def test_candidate_ranking_rejects_unbounded_result_count(self):
+        with self.assertRaises(ValueError):
+            rank_product_features_for_limitation("sensor", [], max_results=5000)
 
 
 class FTOApiTests(TestCase):
@@ -127,6 +158,18 @@ class FTOApiTests(TestCase):
         self.assertEqual(StudyClaimLimitation.objects.filter(study=study).count(), 3)
         self.assertEqual(LimitationAssessment.objects.filter(study=study).count(), 3)
         self.assertTrue(StudyClaimLimitation.objects.filter(study=study, needs_attorney_review=True).exists())
+
+    @patch("fto.tasks.generate_fto_candidate_matches.apply_async")
+    def test_candidate_match_dispatch_uses_one_fenced_reservation(self, apply_async):
+        study = self._create_study()
+        first_task_id = enqueue_fto_candidate_match_generation(str(study.pk), str(self.tenant.pk))
+        second_task_id = enqueue_fto_candidate_match_generation(str(study.pk), str(self.tenant.pk))
+        study.refresh_from_db()
+        self.assertIsNotNone(first_task_id)
+        self.assertIsNone(second_task_id)
+        self.assertEqual(study.matching_status, FTOStudy.MatchingStatus.QUEUED)
+        self.assertEqual(study.matching_task_id, first_task_id)
+        apply_async.assert_called_once()
 
     def test_counter_evidence_and_support_quote_are_pinned_from_confirmed_feature(self):
         study = self._create_study()
@@ -235,3 +278,46 @@ class FTOApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertIn("not findings of infringement", response.data["disclaimer"])
         self.assertEqual(len(response.data["claims"]), 1)
+
+    def test_heatmap_surfaces_explainable_candidate_matches_without_changing_triage(self):
+        study = self._create_study()
+        limitation = StudyClaimLimitation.objects.filter(study=study).first()
+        assessment = LimitationAssessment.objects.get(limitation=limitation)
+        feature = ProductFeature.objects.create(
+            tenant=self.tenant,
+            product_version=self.product_version,
+            feature_key=uuid.uuid4().hex * 2,
+            title="Sensor interface",
+            description="Receives sensor readings.",
+            source_quote=self.product_version.extracted_pages[0][:48],
+            source_page_index=0,
+            source_start_offset=0,
+            source_end_offset=48,
+            review_status=ProductFeature.ReviewStatus.CANDIDATE,
+            created_by=self.user,
+        )
+        FTOCandidateMatch.objects.create(
+            tenant=self.tenant,
+            study=study,
+            assessment=assessment,
+            feature=feature,
+            feature_title_snapshot=feature.title,
+            feature_review_status_snapshot=feature.review_status,
+            source_quote_snapshot=feature.source_quote,
+            source_page_index_snapshot=feature.source_page_index,
+            source_start_offset_snapshot=feature.source_start_offset,
+            source_end_offset_snapshot=feature.source_end_offset,
+            score=0.42,
+            limitation_coverage=0.5,
+            matched_terms=["sensor"],
+            rationale="Lexical retrieval candidate only.",
+        )
+        response = self.client.get(f"/api/v1/fto/studies/{study.pk}/risk-heatmap/", **self.headers)
+        self.assertEqual(response.status_code, 200, response.data)
+        row = response.data["claims"][0]["limitations"][0]
+        self.assertEqual(row["candidate_matches"][0]["feature_id"], str(feature.pk))
+        self.assertEqual(row["candidate_matches"][0]["feature_title"], feature.title)
+        self.assertEqual(row["candidate_matches"][0]["source_quote"], feature.source_quote)
+        self.assertEqual(row["triage_status"], LimitationAssessment.TriageStatus.UNASSESSED)
+        self.assertIn("lexical overlap only", response.data["candidate_match_disclaimer"].casefold())
+        self.assertIn("500", response.data["candidate_match_disclaimer"])
