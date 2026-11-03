@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiRequest, downloadArtifact } from "../lib/apiClient";
 
 const ROOT = "/api/v1/enterprise-auth";
-const MATTER_TYPES = ["patent", "analysis", "claim_chart", "office_action", "fto_study", "product_matter", "landscape_study"];
+const MATTER_TYPES = ["patent", "analysis", "claim_chart", "office_action", "fto_study", "product_matter", "landscape_study", "portfolio_valuation"];
 const ROLES = ["OWNER", "ADMIN", "ATTORNEY", "ANALYST", "REVIEWER", "READ_ONLY"];
 const LEVELS = ["READ", "EDIT", "REVIEW", "ADMIN"];
 
@@ -138,6 +138,7 @@ export default function EnterpriseAdminConsole({ tenant, user }) {
   }
 
   async function togglePolicy(policy, enforceAcl) {
+    if (enforceAcl && !policy.enforce_acl && !window.confirm(`Enable explicit ACL enforcement for ${policy.matter_type} ${policy.matter_id}? Users without a matching matter grant may lose access. Verify required user/role grants before continuing.`)) return;
     setBusy(true); setError("");
     try { await request(`/matter-policies/${policy.id}/`, { method: "PATCH", body: { enforce_acl: enforceAcl } }); setNotice(`ACL enforcement ${enforceAcl ? "enabled" : "disabled"} for ${policy.matter_type} ${policy.matter_id}.`); await refresh(); }
     catch (requestError) { setError(requestError.message || "Could not update policy."); }

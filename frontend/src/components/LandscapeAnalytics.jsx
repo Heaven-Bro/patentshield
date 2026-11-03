@@ -3,6 +3,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, apiRequest } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/landscapes";
+function safeHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
 const inputClass = "ps-input";
 const primaryButton = "ps-button-primary";
 const secondaryButton = "ps-button-secondary";
@@ -441,7 +449,7 @@ export default function LandscapeAnalytics({ tenant }) {
               <form onSubmit={addAssigneeAlias} className="flex flex-col gap-2 sm:flex-row"><input className={inputClass} value={aliasName} onChange={(event) => setAliasName(event.target.value)} maxLength={400} placeholder="Alternate spelling / source assignee name" /><button type="submit" className={secondaryButton} disabled={!selectedAssigneeId || !aliasName.trim() || busyKey === "assignee-alias"}>{busyKey === "assignee-alias" ? "Adding…" : "Add alias"}</button></form>
             </div>
           </article>
-          <article className="ps-panel"><h3 className="text-sm font-bold tracking-tight text-slate-950">Study publication snapshot</h3><p className="mt-1 text-xs leading-5 text-slate-500">The study stores the bibliographic fields used during analysis, its source payload hash, and a snapshot SHA-256 digest. Later provider syncs do not silently rewrite these study rows.</p><div className="mt-4 max-h-72 space-y-2 overflow-y-auto">{studyPublications.length === 0 ? <p className="text-sm text-slate-500">No publications added to this study.</p> : studyPublications.map((publication) => <article key={publication.id} className="rounded-lg border border-slate-200 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-indigo-700">{publication.publication_number || publication.publication}</span><span className="text-[10px] text-slate-500">{publication.jurisdiction} · {dateLabel(publication.filing_date)}</span></div><p className="mt-1 text-sm font-medium text-slate-900">{publication.title}</p><p className="mt-2 break-all font-mono text-[10px] text-slate-400">Snapshot {publication.snapshot_sha256}</p></article>)}</div></article>
+          <article className="ps-panel"><h3 className="text-sm font-bold tracking-tight text-slate-950">Study publication snapshot</h3><p className="mt-1 text-xs leading-5 text-slate-500">The study stores the bibliographic fields used during analysis, its source payload hash, and a snapshot SHA-256 digest. Later provider syncs do not silently rewrite these study rows.</p><div className="mt-4 max-h-72 space-y-2 overflow-y-auto">{studyPublications.length === 0 ? <p className="text-sm text-slate-500">No publications added to this study.</p> : studyPublications.map((publication) => <article key={publication.id} className="rounded-lg border border-slate-200 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-indigo-700">{publication.publication_number || publication.publication}</span><span className="text-[10px] text-slate-500">{publication.jurisdiction} · {dateLabel(publication.filing_date)}</span></div><p className="mt-1 text-sm font-medium text-slate-900">{publication.title}</p><p className="mt-2 break-all font-mono text-[10px] text-slate-400">Snapshot {publication.snapshot_sha256}</p>{safeHttpsUrl(publication.source_url) && <a className="mt-2 inline-flex text-xs font-semibold text-indigo-700 underline underline-offset-2" href={safeHttpsUrl(publication.source_url)} target="_blank" rel="noreferrer">Open provider source</a>}</article>)}</div></article>
         </section>
 
         <section className="ps-panel">

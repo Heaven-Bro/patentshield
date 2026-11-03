@@ -36,6 +36,8 @@ function Section({ title, description, children }) {
 
 export default function PortfolioValuation({ tenant }) {
   const request = useCallback((path, options = {}) => apiRequest(path, { tenantId: tenant.id, ...options }), [tenant.id]);
+  const canManagePortfolio = ["OWNER", "ADMIN", "ATTORNEY", "ANALYST"].includes(tenant?.role);
+  const canAddReviewAnnotation = ["OWNER", "ADMIN", "ATTORNEY", "ANALYST", "REVIEWER"].includes(tenant?.role);
   const [studies, setStudies] = useState([]);
   const [studyId, setStudyId] = useState("");
   const [study, setStudy] = useState(null);
@@ -213,6 +215,7 @@ export default function PortfolioValuation({ tenant }) {
 
       {error && <div role="alert" className="ps-alert-error">{error}</div>}
       {notice && <div role="status" className="ps-alert-success">{notice}</div>}
+      {!canManagePortfolio && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">View-only portfolio access. Study, asset, scenario and diligence changes are unavailable to your current tenant role; server-side matter permissions still apply.</div>}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(280px,0.85fr)_minmax(0,1.5fr)]">
         <Section title="Create a diligence study" description="Currency is fixed after the first scenario revision to prevent accidental currency mixing.">
@@ -220,7 +223,7 @@ export default function PortfolioValuation({ tenant }) {
             <label className="block text-xs font-semibold text-slate-600">Study title<input required value={title} onChange={(event) => setTitle(event.target.value)} className={`${INPUT} mt-1`} placeholder="Example: Connected device portfolio" /></label>
             <label className="block text-xs font-semibold text-slate-600">Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} className={`${INPUT} mt-1 min-h-20`} placeholder="Scope, decision context, and source limitations" /></label>
             <label className="block text-xs font-semibold text-slate-600">Currency<select value={currency} onChange={(event) => setCurrency(event.target.value)} className={`${INPUT} mt-1`}><option>USD</option><option>EUR</option><option>GBP</option><option>JPY</option><option>BDT</option><option>CHF</option></select></label>
-            <button className={BUTTON} disabled={Boolean(busy)} type="submit">{busy === "create-study" ? "Creating…" : "Create study"}</button>
+            <button className={BUTTON} disabled={!canManagePortfolio || Boolean(busy)} type="submit">{busy === "create-study" ? "Creating…" : "Create study"}</button>
           </form>
           <div className="mt-6 border-t border-slate-200 pt-5">
             <label className="block text-xs font-semibold text-slate-600">Active study<select value={studyId} onChange={(event) => setStudyId(event.target.value)} className={`${INPUT} mt-1`}><option value="">Select a study</option>{studies.map((row) => <option key={row.id} value={row.id}>{row.title} · {row.currency}</option>)}</select></label>
@@ -236,7 +239,7 @@ export default function PortfolioValuation({ tenant }) {
             </form>
             {searchResults.length > 0 && <>
               <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">{searchResults.map((row) => <label key={row.id} className="flex gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"><input type="checkbox" className="mt-1" checked={selectedPublicationIds.includes(row.id)} onChange={(event) => setSelectedPublicationIds((current) => event.target.checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /><span className="min-w-0"><span className="block text-xs font-semibold text-slate-800">{row.publication_number || row.provider_record_id} · {row.jurisdiction}</span><span className="mt-1 block text-sm text-slate-700">{row.title}</span><span className="mt-1 block text-[11px] text-slate-500">Status: {row.legal_status} · Family: {row.family_identifier || "unknown"}</span></span></label>)}</div>
-              <button type="button" className={`${BUTTON} mt-3`} disabled={Boolean(busy) || selectedPublicationIds.length === 0} onClick={() => void addAssets()}>Pin selected ({selectedPublicationIds.length})</button>
+              <button type="button" className={`${BUTTON} mt-3`} disabled={!canManagePortfolio || Boolean(busy) || selectedPublicationIds.length === 0} onClick={() => void addAssets()}>Pin selected ({selectedPublicationIds.length})</button>
             </>}
           </>}
         </Section>
@@ -271,7 +274,7 @@ export default function PortfolioValuation({ tenant }) {
         </section>
 
         <Section title="Pinned portfolio assets" description="Legal-status and citation indicators are source-derived snapshots. Confirm current status in the relevant patent office before relying on them.">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-slate-600">{numberLabel(assetTotalCount)} assets in study · showing {numberLabel(assets.length)}{assetsTruncated ? " (first 1,000)" : ""} · {study?.currency}</p><button className={BUTTON} disabled={Boolean(busy) || assetTotalCount === 0} onClick={() => void createDiligenceSnapshot()}>{busy === "diligence" ? "Calculating…" : "Calculate diligence indicators"}</button></div>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-slate-600">{numberLabel(assetTotalCount)} assets in study · showing {numberLabel(assets.length)}{assetsTruncated ? " (first 1,000)" : ""} · {study?.currency}</p><button className={BUTTON} disabled={!canManagePortfolio || Boolean(busy) || assetTotalCount === 0} onClick={() => void createDiligenceSnapshot()}>{busy === "diligence" ? "Calculating…" : "Calculate diligence indicators"}</button></div>
           {assetsTruncated && <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">The table is capped at 1,000 rows. The saved diligence calculation uses the full selected portfolio; use the manifest hash to identify its exact input set.</p>}
           {assets.length === 0 ? <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">No publications pinned yet. Search and select local records above.</p> : <div className="ps-table-wrap"><table className="ps-table text-xs"><thead className="sticky top-0 z-10 bg-slate-900 text-slate-200"><tr><th className="px-4 py-3.5">Publication</th><th className="px-4 py-3.5">Status</th><th className="px-4 py-3.5">Family</th><th className="px-4 py-3.5">Forward cites</th><th className="px-4 py-3.5">Backward cites</th><th className="px-4 py-3.5">Latest observed legal event</th><th className="px-4 py-3.5">Last sync</th></tr></thead><tbody>{assets.map((asset) => <tr key={asset.id} className="border-t border-slate-100 transition-colors hover:bg-indigo-50/40"><td className="max-w-md px-4 py-3.5"><span className="block font-semibold text-slate-800">{asset.publication_number || asset.application_number || "Identifier unavailable"}</span><span className="mt-1 block text-slate-500">{asset.title}</span></td><td className="px-4 py-3.5">{asset.legal_status}</td><td className="px-4 py-3.5">{asset.family_identifier || "Unknown"}</td><td className="px-4 py-3.5">{asset.forward_citation_count ?? "Unknown"}</td><td className="px-4 py-3.5">{asset.backward_citation_count ?? "Unknown"}</td><td className="max-w-xs px-4 py-3.5">{asset.latest_legal_event && Object.keys(asset.latest_legal_event).length > 0 ? <><span className="block font-medium">{asset.latest_legal_event.event_code || "Event"} · {asset.latest_legal_event.event_date || "Date unknown"}</span><span className="mt-1 block text-slate-500">{asset.latest_legal_event.title || "No event title supplied"}</span></> : "No event observed in synchronized records"}</td><td className="px-4 py-3.5">{asset.source_last_synced_at ? String(asset.source_last_synced_at).slice(0, 10) : "Unknown"}</td></tr>)}</tbody></table></div>}
         </Section>
@@ -284,8 +287,8 @@ export default function PortfolioValuation({ tenant }) {
               <label className="block text-xs font-semibold text-slate-600">Approach<select disabled={Boolean(revisionTargetId)} value={scenarioMethod} onChange={(event) => { setScenarioMethod(event.target.value); setAssumptionsText(assumptionsExample(event.target.value)); }} className={`${INPUT} mt-1 disabled:bg-slate-100`}><option value="INCOME">Income · relief from royalty</option><option value="MARKET">Market · comparable transactions</option><option value="COST">Cost · replacement cost</option></select></label>
               <label className="block text-xs font-semibold text-slate-600">Explicit assumptions (JSON)<textarea value={assumptionsText} onChange={(event) => setAssumptionsText(event.target.value)} className={`${INPUT} mt-1 min-h-64 font-mono text-xs`} spellCheck={false} /></label>
               <div className="flex flex-wrap gap-2">
-                <button className={BUTTON} disabled={Boolean(busy)} type="submit">{busy === "scenario" ? "Calculating…" : "Create scenario"}</button>
-                {revisionTargetId && <button className={SECONDARY} disabled={Boolean(busy)} type="button" onClick={() => void reviseScenario()}>{busy === "scenario-revision" ? "Saving revision…" : "Save new revision"}</button>}
+                <button className={BUTTON} disabled={!canManagePortfolio || Boolean(busy)} type="submit">{busy === "scenario" ? "Calculating…" : "Create scenario"}</button>
+                {revisionTargetId && <button className={SECONDARY} disabled={!canManagePortfolio || Boolean(busy)} type="button" onClick={() => void reviseScenario()}>{busy === "scenario-revision" ? "Saving revision…" : "Save new revision"}</button>}
               </div>
             </form>
           </Section>
@@ -298,7 +301,7 @@ export default function PortfolioValuation({ tenant }) {
 
         <div className="grid gap-6 lg:grid-cols-2">
           <Section title="Diligence annotations" description="Record assumptions, source limitations, status checks, and open reviewer questions without changing the immutable source snapshot.">
-            <form onSubmit={addAnnotation} className="space-y-3"><textarea required maxLength={12000} value={annotationText} onChange={(event) => setAnnotationText(event.target.value)} className={`${INPUT} min-h-24`} placeholder="Record a diligence note, evidence reference, or reviewer question." /><button className={BUTTON} disabled={Boolean(busy)} type="submit">Save annotation</button></form>
+            <form onSubmit={addAnnotation} className="space-y-3"><textarea required maxLength={12000} value={annotationText} onChange={(event) => setAnnotationText(event.target.value)} className={`${INPUT} min-h-24`} placeholder="Record a diligence note, evidence reference, or reviewer question." /><button className={BUTTON} disabled={!canAddReviewAnnotation || Boolean(busy)} type="submit">Save annotation</button>{!canAddReviewAnnotation && <p className="text-xs text-slate-500">Annotation entry requires an owner, administrator, attorney, or reviewer role.</p>}</form>
             <div className="mt-4 space-y-2">{annotations.slice(0, 20).map((item) => <article key={item.id} className="rounded-lg border border-slate-200 p-3"><p className="whitespace-pre-wrap text-sm text-slate-700">{item.body}</p><p className="mt-2 text-[11px] text-slate-500">{item.kind} · {item.created_by} · {new Date(item.created_at).toLocaleString()}</p></article>)}</div>
           </Section>
           <Section title="Calculation history" description="Diligence snapshots and scenario revisions preserve the inputs, method version, and asset manifest used at calculation time.">

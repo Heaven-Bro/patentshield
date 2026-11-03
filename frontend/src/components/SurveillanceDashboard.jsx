@@ -3,6 +3,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, apiRequest } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/patents/surveillance";
+function safeHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
 const RULE_TYPES = [
   ["ASSIGNEE", "Competitor / assignee"],
   ["PUBLICATION", "Publication or application number"],
@@ -249,7 +257,7 @@ export default function SurveillanceDashboard({ tenant }) {
           ["Watchlists", watchlists.length],
           ["Open alerts", alerts.filter((alert) => alert.state === "OPEN").length],
           ["Destinations", destinations.filter((destination) => destination.is_active).length],
-          ["Delivery issues", deliveries.filter((delivery) => ["RETRYING", "DEAD_LETTER", "FAILED"].includes(delivery.status)).length],
+          ["Delivery issues", deliveries.filter((delivery) => ["RETRYING", "DEAD_LETTER"].includes(delivery.status)).length],
         ].map(([label, value]) => (
           <div key={label} className="ps-metric-card">
             <p className="text-xs font-medium text-slate-500">{label}</p>
@@ -322,7 +330,7 @@ export default function SurveillanceDashboard({ tenant }) {
             {loading ? <p className="text-sm text-slate-500">Loading alerts…</p> : alerts.length === 0 ? <p className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500">No alerts yet. Add a rule and run a poll to begin monitoring.</p> : (
               <div className="space-y-3">
                 {alerts.map((alert) => {
-                  const sourceUrl = alert.evidence?.source_url || alert.publication?.source_url;
+                  const sourceUrl = safeHttpsUrl(alert.evidence?.source_url || alert.publication?.source_url);
                   return (
                     <article key={alert.id} className="rounded-xl border border-slate-200 p-4">
                       <div className="flex flex-wrap items-start justify-between gap-2"><p className="max-w-xl font-semibold leading-5 text-slate-900">{alert.title}</p><StateBadge value={alert.state} /></div>

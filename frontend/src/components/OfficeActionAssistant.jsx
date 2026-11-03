@@ -43,6 +43,10 @@ function formatDate(value) {
   if (!value) return "Not recorded";
   return new Date(`${value}T00:00:00`).toLocaleDateString();
 }
+function formatConfidence(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "Not reported";
+  return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(0)}%`;
+}
 
 export default function OfficeActionAssistant({ tenant, patents = [] }) {
   const [actions, setActions] = useState([]);
@@ -311,8 +315,10 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
                 {detail.rejections.map((rejection, index) => (
                   <article key={rejection.id} className="rounded-xl border border-slate-200 p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-slate-950">Issue {index + 1}: {rejection.ground_label || rejection.ground}</h3><span className="text-xs text-slate-500">PDF page {rejection.source_page || "—"}</span></div>
-                    <p className="mt-1 text-xs text-slate-500">Claims: {rejection.claim_numbers?.length ? rejection.claim_numbers.join(", ") : "not confidently parsed"} · heuristic score {Number(rejection.parser_confidence).toFixed(2)}</p>
+                    <p className="mt-1 text-xs text-slate-500">Claims: {rejection.claim_numbers?.length ? rejection.claim_numbers.join(", ") : "not confidently parsed"} · parser confidence {formatConfidence(rejection.parser_confidence)}</p>
+                    {rejection.needs_attorney_review && <p className="mt-2 inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-900">Attorney verification required</p>}
                     <blockquote className="mt-3 whitespace-pre-wrap border-l-2 border-indigo-300 pl-3 text-sm leading-6 text-slate-700">{rejection.source_quote}</blockquote>
+                    {rejection.examiner_reasoning && <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Examiner reasoning · extracted text</p><p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-700">{rejection.examiner_reasoning}</p></div>}
                     <div className="mt-3 space-y-2">
                       {(rejection.reference_links || []).map((link) => <div key={link.id} className="rounded-lg bg-slate-50 p-3"><p className="text-sm font-semibold text-indigo-800">{link.cited_reference.identifier}</p><p className="mt-1 text-xs leading-5 text-slate-600">{link.source_quote}</p><p className="mt-1 text-[11px] font-medium text-amber-700">Identifier not externally verified</p></div>)}
                     </div>
@@ -351,6 +357,7 @@ export default function OfficeActionAssistant({ tenant, patents = [] }) {
                   <button type="button" className={secondaryButtonClass} onClick={() => void reviewRevision("REJECTED")} disabled={busy || !currentDraft.current_revision?.id}>Reject draft</button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">Approvals are blocked when the reviewer is also the revision author. Server-side role authorization is enforced.</p>
+                {(currentDraft.current_revision?.reviews || []).length > 0 && <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3"><h3 className="text-xs font-bold uppercase tracking-wide text-slate-700">Review history · revision {currentDraft.current_revision_number}</h3><div className="mt-2 space-y-2">{currentDraft.current_revision.reviews.map((review) => <article key={review.id} className="rounded-md bg-white p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-slate-800">{review.reviewer_username || "Reviewer"} · {review.decision.replaceAll("_", " ")}</span><time className="text-[10px] text-slate-500">{new Date(review.created_at).toLocaleString()}</time></div>{review.comments && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-600">{review.comments}</p>}</article>)}</div></div>}
               </div>
             </>}
           </Card>}
