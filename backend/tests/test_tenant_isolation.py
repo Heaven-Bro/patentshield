@@ -25,6 +25,7 @@ from rest_framework.test import APIClient
 
 from analyses.models import AnalysisReport, ClaimAssessment
 from analyses.routing import websocket_urlpatterns
+from enterprise_identity.models import MatterGrant, MatterPolicy
 from indexing.models import TextChunk
 from patents.models import Claim, Patent, PatentDocumentVersion
 from tenants.models import Tenant, TenantMembership
@@ -283,6 +284,82 @@ def test_cross_tenant_websocket_rejected(tenant_pair: TenantPair) -> None:
         "accepted into its progress WebSocket group."
     )
     assert close_code == 4403
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(
+    CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+)
+def test_analysis_websocket_requires_both_matter_read_grants(
+    tenant_pair: TenantPair,
+) -> None:
+    """Analysis READ alone cannot expose patent-linked progress events."""
+    tenant = tenant_pair["tenant_a"]
+    user = tenant_pair["user_a"]
+    patent, version = _create_patent_version(
+        tenant=tenant,
+        user=user,
+        label="compound-acl-websocket",
+    )
+    analysis, _assessment = _create_analysis_with_assessment(
+        tenant=tenant,
+        user=user,
+        patent=patent,
+        version=version,
+    )
+    MatterPolicy.objects.create(
+        tenant=tenant,
+        matter_type="analysis",
+        matter_id=analysis.pk,
+        enforce_acl=True,
+        created_by=user,
+    )
+    MatterPolicy.objects.create(
+        tenant=tenant,
+        matter_type="patent",
+        matter_id=patent.pk,
+        enforce_acl=True,
+        created_by=user,
+    )
+    MatterGrant.objects.create(
+        tenant=tenant,
+        matter_type="analysis",
+        matter_id=analysis.pk,
+        subject_user=user,
+        level=MatterGrant.Level.READ,
+        created_by=user,
+    )
+
+    django_client = Client()
+    django_client.force_login(user)
+    session_cookie = django_client.cookies[settings.SESSION_COOKIE_NAME].value
+    headers = [
+        (b"cookie", f"{settings.SESSION_COOKIE_NAME}={session_cookie}".encode("ascii")),
+    ]
+    application = AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
+    path = f"/ws/v1/analyses/{analysis.pk}/"
+
+    async def _attempt_connection() -> tuple[bool, int | str | None]:
+        communicator = WebsocketCommunicator(application, path, headers=headers)
+        connected, close_code_or_subprotocol = await communicator.connect()
+        if connected:
+            await communicator.disconnect()
+        return connected, close_code_or_subprotocol
+
+    connected, close_code = async_to_sync(_attempt_connection)()
+    assert connected is False
+    assert close_code == 4403
+
+    MatterGrant.objects.create(
+        tenant=tenant,
+        matter_type="patent",
+        matter_id=patent.pk,
+        subject_user=user,
+        level=MatterGrant.Level.READ,
+        created_by=user,
+    )
+    connected, _close_code = async_to_sync(_attempt_connection)()
+    assert connected is True
 
 
 @pytest.mark.django_db

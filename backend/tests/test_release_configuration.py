@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 from django.test import SimpleTestCase
@@ -17,6 +18,8 @@ class ReleaseConfigurationTests(SimpleTestCase):
     def test_required_api_routes_are_registered(self) -> None:
         analysis_id = uuid4()
         routes = (
+            ("/health/live/", "health-live"),
+            ("/health/ready/", "health-ready"),
             ("/api/v1/auth/me/", "me"),
             ("/api/v1/tenants/", "tenant-list"),
             ("/api/v1/patents/upload/", "patent-upload"),
@@ -62,3 +65,24 @@ class ReleaseConfigurationTests(SimpleTestCase):
             routes["reports.tasks.generate_analysis_report"]["queue"],
             "exports",
         )
+
+    def test_health_and_worker_probes_are_configured(self) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        api_template = (
+            repository_root
+            / "deploy/helm/patentshield/templates/api-deployment.yaml"
+        ).read_text()
+        worker_template = (
+            repository_root
+            / "deploy/helm/patentshield/templates/worker-deployment.yaml"
+        ).read_text()
+        compose = (repository_root / "docker-compose.yml").read_text()
+
+        self.assertIn("path: /health/ready/", api_template)
+        self.assertIn("path: /health/live/", api_template)
+        self.assertIn("livenessProbe:", worker_template)
+        self.assertIn("readinessProbe:", worker_template)
+        self.assertIn("kill -0 1", worker_template)
+        self.assertIn("celery -A config inspect ping", worker_template)
+        self.assertIn("http://127.0.0.1:8000/health/ready/", compose)
+        self.assertEqual(compose.count("celery -A config inspect ping"), 2)

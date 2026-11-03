@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from patents.models import Patent, PatentDocumentVersion
@@ -99,12 +102,86 @@ class PatentDocumentUploadAPITests(TestCase):
         self.assertEqual(len(version.content_sha256), 64)
         self.assertEqual(
             version.extraction_status,
-            PatentDocumentVersion.ExtractionStatus.EXTRACTING,
+            PatentDocumentVersion.ExtractionStatus.PENDING,
         )
+        self.assertIsNotNone(version.extraction_queued_at)
+        self.assertEqual(patent.status, Patent.Status.PROCESSING)
         apply_async_mock.assert_called_once_with(
             args=[str(version.pk)],
             queue="ingestion",
         )
+
+    @patch("patents.views.process_patent_document_version.apply_async")
+    def test_retry_rejects_a_recent_queue_reservation_without_duplicate_publish(
+        self,
+        apply_async_mock: MagicMock,
+    ) -> None:
+        patent = Patent.objects.create(
+            tenant=self.tenant_a,
+            title="Queued patent",
+            created_by=self.user_a,
+            status=Patent.Status.PROCESSING,
+        )
+        version = PatentDocumentVersion.objects.create(
+            tenant=self.tenant_a,
+            patent=patent,
+            version_number=1,
+            storage_key="patents/test/queued.pdf",
+            content_sha256="a" * 64,
+            extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
+            extraction_queued_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            reverse(
+                "patents:patent-version-process",
+                kwargs={"patent_id": patent.pk, "version_id": version.pk},
+            ),
+            {},
+            HTTP_X_TENANT_ID=str(self.tenant_a.pk),
+        )
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["extraction_status"], "PENDING")
+        apply_async_mock.assert_not_called()
+
+    @patch("patents.views.process_patent_document_version.apply_async")
+    def test_stale_pending_queue_can_be_retried_without_changing_version_identity(
+        self,
+        apply_async_mock: MagicMock,
+    ) -> None:
+        patent = Patent.objects.create(
+            tenant=self.tenant_a,
+            title="Stale queued patent",
+            created_by=self.user_a,
+            status=Patent.Status.PROCESSING,
+        )
+        stale_time = timezone.now() - timedelta(minutes=16)
+        version = PatentDocumentVersion.objects.create(
+            tenant=self.tenant_a,
+            patent=patent,
+            version_number=1,
+            storage_key="patents/test/stale.pdf",
+            content_sha256="b" * 64,
+            extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
+            extraction_queued_at=stale_time,
+        )
+
+        response = self.client.post(
+            reverse(
+                "patents:patent-version-process",
+                kwargs={"patent_id": patent.pk, "version_id": version.pk},
+            ),
+            {},
+            HTTP_X_TENANT_ID=str(self.tenant_a.pk),
+        )
+
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data["document_version_id"], str(version.pk))
+        self.assertEqual(response.data["extraction_status"], "PENDING")
+        version.refresh_from_db()
+        self.assertGreater(version.extraction_queued_at, stale_time)
+        apply_async_mock.assert_called_once_with(args=[str(version.pk)], queue="ingestion")
 
     @patch("patents.views.process_patent_document_version.apply_async")
     def test_cross_tenant_upload_is_denied(
@@ -159,5 +236,7 @@ class PatentDocumentUploadAPITests(TestCase):
             version.extraction_status,
             PatentDocumentVersion.ExtractionStatus.FAILED,
         )
+        self.assertIsNone(version.extraction_queued_at)
+        self.assertEqual(version.extraction_error_code, "RuntimeError")
         self.assertEqual(version.tenant_id, self.tenant_a.pk)
         apply_async_mock.assert_called_once()
