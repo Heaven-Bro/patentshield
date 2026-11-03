@@ -24,7 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from audit.models import AuditLog
-from ingestion.tasks import process_patent_document_version
+from ingestion.tasks import EXTRACTION_QUEUE_GRACE_PERIOD, process_patent_document_version
 from patents.models import Claim, Patent, PatentDocumentVersion
 from patents.serializers import PatentDocumentUploadSerializer
 from tenants.models import Tenant, TenantMembership
@@ -370,6 +370,18 @@ class PatentVersionProcessView(TenantPatentAPIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
+        if (
+            version.extraction_status == PatentDocumentVersion.ExtractionStatus.PENDING
+            and version.extraction_queued_at
+            and version.extraction_queued_at > timezone.now() - EXTRACTION_QUEUE_GRACE_PERIOD
+        ):
+            return Response(
+                {
+                    "detail": "Document processing is already queued.",
+                    "extraction_status": version.extraction_status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         queued, queue_error_type = _queue_document_processing(
             tenant_id=tenant.pk,
@@ -392,11 +404,17 @@ class PatentVersionProcessView(TenantPatentAPIView):
                 status=response_status,
             )
 
+        version.refresh_from_db(fields=("extraction_status", "extraction_queued_at"))
         return Response(
             {
                 "patent_id": str(version.patent_id),
                 "document_version_id": str(version.pk),
-                "extraction_status": PatentDocumentVersion.ExtractionStatus.EXTRACTING,
+                "extraction_status": version.extraction_status,
+                "extraction_queued_at": (
+                    version.extraction_queued_at.isoformat()
+                    if version.extraction_queued_at
+                    else None
+                ),
                 "queue": "ingestion",
             },
             status=status.HTTP_202_ACCEPTED,
@@ -526,7 +544,8 @@ def _queue_document_processing(
     actor_user_id: Any,
     request_id: str | None,
 ) -> tuple[bool, str | None]:
-    """Reserve a pending version, enqueue extraction, and record queue failures."""
+    """Reserve a version queue timestamp, publish extraction, and record failures."""
+    queue_time = timezone.now()
     with transaction.atomic():
         try:
             version = (
@@ -550,11 +569,21 @@ def _queue_document_processing(
             PatentDocumentVersion.ExtractionStatus.EXTRACTION_FAILED,
         }:
             return False, "VersionAlreadyProcessing"
+        if (
+            version.extraction_status == PatentDocumentVersion.ExtractionStatus.PENDING
+            and version.extraction_queued_at
+            and version.extraction_queued_at > queue_time - EXTRACTION_QUEUE_GRACE_PERIOD
+        ):
+            return False, "VersionAlreadyProcessing"
 
-        version.extraction_status = (
-            PatentDocumentVersion.ExtractionStatus.EXTRACTING
-        )
-        version.save(update_fields=("extraction_status",))
+        version.extraction_status = PatentDocumentVersion.ExtractionStatus.PENDING
+        version.extraction_started_at = None
+        version.extraction_queued_at = queue_time
+        version.extraction_error_code = ""
+        version.save(update_fields=(
+            "extraction_status", "extraction_started_at",
+            "extraction_queued_at", "extraction_error_code",
+        ))
         Patent.objects.filter(pk=patent_id, tenant_id=tenant_id).update(
             status=Patent.Status.PROCESSING
         )
@@ -565,40 +594,53 @@ def _queue_document_processing(
             queue="ingestion",
         )
     except Exception as exc:
-        logger.exception(
-            "Could not enqueue document version %s (request_id=%s).",
+        logger.error(
+            "Could not enqueue document version %s (request_id=%s, error_type=%s).",
             version_id,
             request_id,
+            type(exc).__name__,
         )
         with transaction.atomic():
-            PatentDocumentVersion.objects.filter(
+            changed = PatentDocumentVersion.objects.filter(
                 pk=version_id,
                 tenant_id=tenant_id,
+                patent_id=patent_id,
+                extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
+                extraction_queued_at=queue_time,
             ).update(
-                extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED
+                extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED,
+                extraction_queued_at=None,
+                extraction_error_code=type(exc).__name__[:64],
             )
-            Patent.objects.filter(pk=patent_id, tenant_id=tenant_id).update(
-                status=Patent.Status.FAILED
-            )
-            try:
-                # Isolate an audit-only database error with a savepoint so it
-                # cannot roll back the failure state recorded above.
-                with transaction.atomic():
-                    AuditLog.objects.create(
-                        tenant_id=tenant_id,
-                        actor_user_id=actor_user_id,
-                        action="QUEUE_PATENT_DOCUMENT_PROCESSING",
-                        resource_type="PatentDocumentVersion",
-                        resource_id=version_id,
-                        request_id=request_id,
-                        outcome=AuditLog.Outcome.FAILURE,
-                        metadata={"error_type": type(exc).__name__},
-                    )
-            except Exception:
-                logger.exception(
-                    "Could not write task-enqueue failure audit for %s.",
-                    version_id,
+            if changed:
+                Patent.objects.filter(pk=patent_id, tenant_id=tenant_id).update(
+                    status=Patent.Status.FAILED
                 )
+                try:
+                    # Isolate audit failure so it cannot roll back the state.
+                    with transaction.atomic():
+                        AuditLog.objects.create(
+                            tenant_id=tenant_id,
+                            actor_user_id=actor_user_id,
+                            action="QUEUE_PATENT_DOCUMENT_PROCESSING",
+                            resource_type="PatentDocumentVersion",
+                            resource_id=version_id,
+                            request_id=request_id,
+                            outcome=AuditLog.Outcome.FAILURE,
+                            metadata={"error_type": type(exc).__name__[:64]},
+                        )
+                except Exception:
+                    logger.error("Could not write task-enqueue failure audit for %s.", version_id)
+        if not changed:
+            current = PatentDocumentVersion.objects.for_tenant(tenant_id).filter(
+                pk=version_id,
+                patent_id=patent_id,
+            ).values("extraction_status", "extraction_queued_at").first()
+            if current and (
+                current["extraction_status"] != PatentDocumentVersion.ExtractionStatus.PENDING
+                or current["extraction_queued_at"] != queue_time
+            ):
+                return True, None
         return False, type(exc).__name__
 
     return True, None
@@ -612,6 +654,16 @@ def _serialize_version(version: PatentDocumentVersion) -> dict[str, Any]:
         "mime_type": version.mime_type,
         "page_count": version.page_count,
         "extraction_status": version.extraction_status,
+        "extraction_queued_at": (
+            version.extraction_queued_at.isoformat()
+            if version.extraction_queued_at
+            else None
+        ),
+        "extraction_started_at": (
+            version.extraction_started_at.isoformat()
+            if version.extraction_started_at
+            else None
+        ),
         "extraction_error_code": version.extraction_error_code,
         "text_indexing_status": version.text_indexing_status,
         "text_indexing_attempts": version.text_indexing_attempts,

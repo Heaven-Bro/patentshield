@@ -107,6 +107,7 @@ class PatentDocumentVersion(TenantScopedModel):
         default=ExtractionStatus.PENDING,
     )
     extraction_started_at = models.DateTimeField(null=True, blank=True)
+    extraction_queued_at = models.DateTimeField(null=True, blank=True)
     extraction_error_code = models.CharField(max_length=64, blank=True, default="")
     text_indexing_status = models.CharField(
         max_length=12,
@@ -133,6 +134,12 @@ class PatentDocumentVersion(TenantScopedModel):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=("extraction_status", "extraction_queued_at"),
+                name="patver_queue_status_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=("patent", "version_number"),

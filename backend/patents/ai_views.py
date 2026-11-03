@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import timezone as datetime_timezone
+from email.utils import parsedate_to_datetime
+from math import ceil
 from typing import Any
 from uuid import UUID
 
 from django.conf import settings
 from django.db.models import Q
+from django.utils import timezone
 from pgvector.django import CosineDistance
 from rest_framework import status
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, Throttled
@@ -40,6 +44,27 @@ from tenants.models import TenantExternalAIProcessingPolicy, TenantMembership
 from tenants.permissions import HasTenantAccess, RequireTenantRole
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    """Parse a bounded Retry-After value without trusting provider text."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return min(int(value), 3600)
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=datetime_timezone.utc)
+        now = timezone.now()
+        if timezone.is_naive(now):
+            now = now.replace(tzinfo=datetime_timezone.utc)
+        seconds = ceil((retry_at - now).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0, min(seconds, 3600))
+
 
 _READ_ROLES = (
     TenantMembership.Role.OWNER,
@@ -113,9 +138,7 @@ class PatentAIAPIView(APIView):
             raise PatentAIServiceUnavailable(str(exc)) from exc
         if isinstance(exc, MetaLLMUpstreamError):
             if exc.status_code == 429:
-                wait = None
-                if exc.retry_after and exc.retry_after.strip().isdigit():
-                    wait = min(int(exc.retry_after.strip()), 3600)
+                wait = _retry_after_seconds(exc.retry_after)
                 raise Throttled(wait=wait, detail="The AI provider rate limit was reached; retry later.") from exc
             if exc.status_code is not None and 400 <= exc.status_code < 500:
                 raise PatentAIProviderBadGateway() from exc
