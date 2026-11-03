@@ -15,7 +15,7 @@ export default function TenantSwitcher({ tenants, value, onChange, disabled = fa
         value={selectedTenant?.id || ""}
         disabled={disabled || tenants.length === 0}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full min-w-0 rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 shadow-sm outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:bg-slate-100"
+        className={`w-full min-w-0 rounded-lg border px-3 py-2.5 text-sm font-semibold shadow-sm outline-none transition focus:ring-2 disabled:cursor-not-allowed ${dark ? "border-white/15 bg-slate-900 text-slate-100 focus:border-indigo-300 focus:ring-indigo-300/20 disabled:bg-slate-800" : "border-slate-300 bg-white text-slate-800 focus:border-indigo-500 focus:ring-indigo-100 disabled:bg-slate-100"}`}
         aria-describedby={`${id}-role`}
       >
         <option value="" disabled>
