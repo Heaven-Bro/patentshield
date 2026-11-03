@@ -2923,3 +2923,7 @@ zstandard==0.25.0 \
     # via
     #   -c requirements.txt
     #   langsmith
+
+# Added for the official BGE-M3 and BGE multilingual reranker APIs.
+# Regenerate this file with scripts/compile_requirements.sh to add transitive hashes.
+FlagEmbedding==1.4.2

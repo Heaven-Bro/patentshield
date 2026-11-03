@@ -247,23 +247,38 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 
-# Model paths are ordinary local files in air-gapped deployments. The existing
-# inference wrappers already use local_files_only=True, so a path override keeps
-# model loading local without changing embedding dimensions or semantics.
-BGE_MODEL_NAME = (
-    os.getenv("PATENTSHIELD_BGE_MODEL_PATH", "").strip()
-    or os.getenv("BGE_MODEL_NAME", "BAAI/bge-m3").strip()
-    or "BAAI/bge-m3"
-)
+# Model paths are ordinary local files in air-gapped deployments. Keep canonical
+# model IDs separate from local paths. Model identity is persisted
+# with every vector row, while deployment paths may differ between environments.
+BGE_MODEL_NAME = os.getenv("BGE_MODEL_NAME", "BAAI/bge-m3").strip() or "BAAI/bge-m3"
+BGE_MODEL_PATH = os.getenv("PATENTSHIELD_BGE_MODEL_PATH", "").strip()
 BGE_MODEL_REVISION = os.getenv("PATENTSHIELD_BGE_MODEL_REVISION", "main").strip() or "main"
 BGE_BATCH_SIZE = int(os.getenv("PATENTSHIELD_BGE_BATCH_SIZE", "32"))
+PATENTSHIELD_BGE_MAX_LENGTH = int(os.getenv("PATENTSHIELD_BGE_MAX_LENGTH", "8192"))
+PATENTSHIELD_BGE_USE_FP16 = _env_bool("PATENTSHIELD_BGE_USE_FP16", False)
+PATENTSHIELD_BGE_DEVICE = os.getenv("PATENTSHIELD_BGE_DEVICE", "").strip()
+PATENTSHIELD_MODEL_CACHE_DIR = os.getenv("PATENTSHIELD_MODEL_CACHE_DIR", "").strip()
 if not 1 <= BGE_BATCH_SIZE <= 256:
     raise ImproperlyConfigured("PATENTSHIELD_BGE_BATCH_SIZE must be between 1 and 256.")
+if not 128 <= PATENTSHIELD_BGE_MAX_LENGTH <= 8192:
+    raise ImproperlyConfigured("PATENTSHIELD_BGE_MAX_LENGTH must be between 128 and 8192.")
 PATENTSHIELD_RERANKER_MODEL_NAME = (
-    os.getenv("PATENTSHIELD_RERANKER_MODEL_PATH", "").strip()
-    or os.getenv("PATENTSHIELD_RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3").strip()
+    os.getenv("PATENTSHIELD_RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3").strip()
     or "BAAI/bge-reranker-v2-m3"
 )
+PATENTSHIELD_RERANKER_MODEL_PATH = os.getenv("PATENTSHIELD_RERANKER_MODEL_PATH", "").strip()
+PATENTSHIELD_RERANKER_USE_FP16 = _env_bool("PATENTSHIELD_RERANKER_USE_FP16", False)
+PATENTSHIELD_RERANKER_DEVICE = os.getenv("PATENTSHIELD_RERANKER_DEVICE", "").strip()
+PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH = int(
+    os.getenv("PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH", "256")
+)
+PATENTSHIELD_RERANKER_MAX_LENGTH = int(
+    os.getenv("PATENTSHIELD_RERANKER_MAX_LENGTH", "512")
+)
+if not 64 <= PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH <= 1024:
+    raise ImproperlyConfigured("PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH must be between 64 and 1024.")
+if not 128 <= PATENTSHIELD_RERANKER_MAX_LENGTH <= 2048:
+    raise ImproperlyConfigured("PATENTSHIELD_RERANKER_MAX_LENGTH must be between 128 and 2048.")
 
 # Public patent semantic search uses BAAI/bge-large-en-v1.5 (1,024 dimensions).
 PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_MODEL_NAME = (

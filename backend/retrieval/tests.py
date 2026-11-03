@@ -1,8 +1,11 @@
 """Tests for retrieval, including bounded external provider transport."""
 
+from types import ModuleType
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
+
+from retrieval.schemas import RetrievedCandidate
 
 from retrieval.external import (
     MAX_PROVIDER_RESPONSE_BYTES,
@@ -150,3 +153,119 @@ class ExternalProviderTransportSecurityTests(SimpleTestCase):
                     )
         self.assertTrue(response.iterated)
         self.assertTrue(response.closed)
+
+
+class FlagRerankerAdapterTests(SimpleTestCase):
+    def setUp(self):
+        self._original_state = (
+            CrossEncoderReranker._model,
+            CrossEncoderReranker._load_attempted,
+            CrossEncoderReranker._load_error,
+        )
+        CrossEncoderReranker._model = None
+        CrossEncoderReranker._load_attempted = False
+        CrossEncoderReranker._load_error = None
+
+    def tearDown(self):
+        (
+            CrossEncoderReranker._model,
+            CrossEncoderReranker._load_attempted,
+            CrossEncoderReranker._load_error,
+        ) = self._original_state
+
+    def test_flag_reranker_receives_pairs_and_normalizes_scores(self):
+        calls = {}
+
+        class FakeFlagReranker:
+            def compute_score(self, pairs, batch_size=0, max_length=0, normalize=False):
+                calls["pairs"] = pairs
+                calls["batch_size"] = batch_size
+                calls["max_length"] = max_length
+                calls["normalize"] = normalize
+                return [0.2, 0.9]
+
+        CrossEncoderReranker._model = FakeFlagReranker()
+        candidates = [
+            RetrievedCandidate(
+                chunk_id="c1", tenant_id="t1", patent_id="p1",
+                document_version_id="v1", section_type="ABSTRACT",
+                text="A general device.",
+            ),
+            RetrievedCandidate(
+                chunk_id="c2", tenant_id="t1", patent_id="p1",
+                document_version_id="v1", section_type="ABSTRACT",
+                text="A wireless communication system.",
+            ),
+        ]
+
+        result = CrossEncoderReranker.rerank("wireless system", candidates, top_n=2)
+
+        self.assertTrue(calls["normalize"])
+        self.assertEqual(calls["batch_size"], 16)
+        self.assertEqual(calls["max_length"], 512)
+        self.assertEqual(calls["pairs"][0], ["wireless system", "A general device."])
+        self.assertEqual([item.chunk_id for item in result], ["c2", "c1"])
+        self.assertEqual([item.rerank_score for item in result], [0.9, 0.2])
+
+    def test_reranker_rejects_non_probability_output_when_normalize_is_requested(self):
+        class FakeFlagReranker:
+            def compute_score(self, pairs, batch_size=0, max_length=0, normalize=False):
+                return [1.5]
+
+        CrossEncoderReranker._model = FakeFlagReranker()
+        candidate = RetrievedCandidate(
+            chunk_id="c1", tenant_id="t1", patent_id="p1",
+            document_version_id="v1", section_type="ABSTRACT",
+            text="A device.",
+        )
+        with self.assertRaisesRegex(RuntimeError, r"outside \[0, 1\]"):
+            CrossEncoderReranker.rerank("device", [candidate])
+
+
+class FlagRerankerModelLoadingTests(SimpleTestCase):
+    def setUp(self):
+        self._original_state = (
+            CrossEncoderReranker._model,
+            CrossEncoderReranker._load_attempted,
+            CrossEncoderReranker._load_error,
+        )
+        CrossEncoderReranker._model = None
+        CrossEncoderReranker._load_attempted = False
+        CrossEncoderReranker._load_error = None
+
+    def tearDown(self):
+        (
+            CrossEncoderReranker._model,
+            CrossEncoderReranker._load_attempted,
+            CrossEncoderReranker._load_error,
+        ) = self._original_state
+
+    def test_loads_air_gapped_directory_separately_from_model_identity(self):
+        calls = {}
+
+        class FakeFlagReranker:
+            def __init__(self, model_name_or_path, **kwargs):
+                calls["model_source"] = model_name_or_path
+                calls["kwargs"] = kwargs
+
+        fake_module = ModuleType("FlagEmbedding")
+        fake_module.FlagReranker = FakeFlagReranker
+        with (
+            override_settings(
+                PATENTSHIELD_RERANKER_MODEL_NAME="BAAI/bge-reranker-v2-m3",
+                PATENTSHIELD_RERANKER_MODEL_PATH="/models/reranker",
+                PATENTSHIELD_RERANKER_USE_FP16=False,
+                PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH=256,
+                PATENTSHIELD_RERANKER_MAX_LENGTH=512,
+                PATENTSHIELD_RERANKER_DEVICE="cpu",
+                PATENTSHIELD_MODEL_CACHE_DIR="",
+            ),
+            patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
+            patch("retrieval.services.os.path.isdir", return_value=True),
+        ):
+            model = CrossEncoderReranker._get_model()
+
+        self.assertIsInstance(model, FakeFlagReranker)
+        self.assertEqual(calls["model_source"], "/models/reranker")
+        self.assertEqual(calls["kwargs"]["devices"], ["cpu"])
+        self.assertEqual(calls["kwargs"]["query_max_length"], 256)

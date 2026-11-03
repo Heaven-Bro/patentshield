@@ -169,7 +169,7 @@ class ReciprocalRankFusionService:
 
 
 class CrossEncoderReranker:
-    """Rerank fused results using the locally cached FastEmbed BGE reranker model."""
+    """Rerank fused results with the official multilingual FlagEmbedding reranker."""
 
     MODEL_NAME = "BAAI/bge-reranker-v2-m3"
     _model: Any | None = None
@@ -186,8 +186,9 @@ class CrossEncoderReranker:
     ) -> list[RetrievedCandidate]:
         """Score query/chunk pairs and return the top ``top_n`` candidates.
 
-        Raw single-logit model outputs are converted through a sigmoid to
-        normalized values in ``[0, 1]``. If model weights are missing, a
+        The official FlagReranker applies sigmoid normalization when requested,
+        so returned model scores are already constrained to ``[0, 1]``. If
+        model weights are missing, a
         transparent lexical-overlap mock is allowed only in DEBUG or when
         ``PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS`` is enabled. Inference failures
         after successful model loading are raised, not hidden by mock scores.
@@ -216,17 +217,30 @@ class CrossEncoderReranker:
         else:
             documents = [candidate.text for candidate in candidates]
             try:
-                # FastEmbed rerank returns score generators/arrays per document
-                raw_scores = list(model.rerank(query.strip(), documents))
+                # FlagReranker returns sigmoid-normalized [0, 1] scores when
+                # normalize=True. It accepts a local directory for air-gapped
+                # model bundles as well as the public model ID.
+                pairs = [[query.strip(), document] for document in documents]
+                raw_scores = model.compute_score(
+                    pairs,
+                    batch_size=int(
+                        getattr(settings, "PATENTSHIELD_RERANKER_BATCH_SIZE", 16)
+                    ),
+                    max_length=int(
+                        getattr(settings, "PATENTSHIELD_RERANKER_MAX_LENGTH", 512)
+                    ),
+                    normalize=True,
+                )
             except Exception:
                 logger.exception("Cross-encoder inference failed.")
                 raise
-            flat_scores = _flatten_scalar_scores(raw_scores)
-            if len(flat_scores) != len(candidates):
+            normalized_scores = _flatten_scalar_scores(raw_scores)
+            if len(normalized_scores) != len(candidates):
                 raise RuntimeError(
                     "Cross-encoder score count does not match candidate count."
                 )
-            normalized_scores = [_sigmoid(score) for score in flat_scores]
+            if any(score < 0.0 or score > 1.0 for score in normalized_scores):
+                raise RuntimeError("FlagReranker returned a score outside [0, 1].")
 
         reranked: list[RetrievedCandidate] = []
         for candidate, score in zip(
@@ -253,7 +267,7 @@ class CrossEncoderReranker:
 
     @classmethod
     def _get_model(cls) -> Any | None:
-        """Load FastEmbed TextReranker exactly once per worker process from local cache."""
+        """Load FlagReranker once per worker, supporting local offline bundles."""
         if cls._model is not None:
             return cls._model
 
@@ -269,19 +283,40 @@ class CrossEncoderReranker:
 
             cls._load_attempted = True
             try:
-                try:
-                    from fastembed import TextReranker
-                except ImportError:
-                    from fastembed.rerank.cross_encoder import TextCrossEncoder as TextReranker
+                from FlagEmbedding import FlagReranker
 
+                model_path = str(
+                    getattr(settings, "PATENTSHIELD_RERANKER_MODEL_PATH", "")
+                ).strip()
                 model_name = str(
-                    getattr(
-                        settings,
-                        "PATENTSHIELD_RERANKER_MODEL_NAME",
-                        cls.MODEL_NAME,
-                    )
+                    getattr(settings, "PATENTSHIELD_RERANKER_MODEL_NAME", cls.MODEL_NAME)
                 )
-                cls._model = TextReranker(model_name=model_name)
+                model_source = model_path or model_name
+                if model_path and not os.path.isdir(model_path):
+                    raise RuntimeError(
+                        "Configured PATENTSHIELD_RERANKER_MODEL_PATH is not a directory."
+                    )
+
+                kwargs: dict[str, Any] = {
+                    "use_fp16": _setting_enabled(
+                        getattr(settings, "PATENTSHIELD_RERANKER_USE_FP16", False)
+                    ),
+                    "query_max_length": int(
+                        getattr(settings, "PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH", 256)
+                    ),
+                    "passage_max_length": int(
+                        getattr(settings, "PATENTSHIELD_RERANKER_MAX_LENGTH", 512)
+                    ),
+                }
+                device = str(
+                    getattr(settings, "PATENTSHIELD_RERANKER_DEVICE", "")
+                ).strip()
+                if device:
+                    kwargs["devices"] = [device]
+                cache_dir = str(getattr(settings, "PATENTSHIELD_MODEL_CACHE_DIR", "")).strip()
+                if cache_dir:
+                    kwargs["cache_dir"] = cache_dir
+                cls._model = FlagReranker(model_source, **kwargs)
             except Exception as exc:
                 cls._model = None
                 cls._load_error = exc
@@ -498,15 +533,6 @@ def _flatten_scalar_scores(raw_scores: Any) -> list[float]:
         scores.append(score)
     return scores
 
-
-def _sigmoid(value: float) -> float:
-    """Map a finite logit to a numerically stable probability-like score."""
-    if not math.isfinite(value):
-        raise RuntimeError("Cross-encoder returned a non-finite score.")
-    if value >= 0:
-        return 1.0 / (1.0 + math.exp(-value))
-    exp_value = math.exp(value)
-    return exp_value / (1.0 + exp_value)
 
 
 def _setting_enabled(value: object) -> bool:

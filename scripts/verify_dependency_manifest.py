@@ -42,7 +42,7 @@ REQUIRED_PACKAGES: dict[str, set[str]] = {
         "django-storages",
     },
     "requirements-dev.txt": {"pytest", "pytest-django", "psutil"},
-    "requirements-ml.txt": {"fastembed"},
+    "requirements-ml.txt": {"fastembed", "flagembedding"},
 }
 
 
@@ -64,6 +64,29 @@ def pinned_distributions(path: Path) -> dict[str, str]:
             pins[normalize_name(match.group(1))] = match.group(2)
     return pins
 
+
+
+def distributions_without_hashes(path: Path) -> list[str]:
+    """Return pinned packages whose own requirement block contains no SHA-256 hash."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    missing: list[str] = []
+    current_name: str | None = None
+    current_has_hash = False
+
+    def finish_current() -> None:
+        if current_name is not None and not current_has_hash:
+            missing.append(current_name)
+
+    for line in lines:
+        match = PACKAGE_LINE.match(line)
+        if match:
+            finish_current()
+            current_name = normalize_name(match.group(1))
+            current_has_hash = "--hash=sha256:" in line
+        elif current_name is not None and "--hash=sha256:" in line:
+            current_has_hash = True
+    finish_current()
+    return missing
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -90,14 +113,11 @@ def main() -> int:
                 f"{relative_path} missing exact version pins: {missing_text}"
             )
         if args.require_hashes:
-            text = path.read_text(encoding="utf-8")
-            pins_count = len(pins)
-            hashes_count = text.count("--hash=sha256:")
-            if pins_count == 0 or hashes_count < pins_count:
+            unhashed = distributions_without_hashes(path)
+            if unhashed:
                 errors.append(
-                    f"{relative_path} is not a complete hash lock "
-                    f"({hashes_count} hashes for {pins_count} pinned packages); "
-                    "run scripts/compile_requirements.sh."
+                    f"{relative_path} has pinned packages without SHA-256 hashes: "
+                    f"{', '.join(unhashed)}; run scripts/compile_requirements.sh."
                 )
 
     source_to_lock = {

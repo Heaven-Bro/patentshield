@@ -2,3 +2,4 @@
 # The real-model worker image is deliberately opt-in because Torch wheels are
 # large and CPU/GPU deployments require platform-specific binary selection.
 fastembed==0.5.1
+FlagEmbedding==1.4.2

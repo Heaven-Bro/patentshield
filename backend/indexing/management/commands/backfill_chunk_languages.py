@@ -19,17 +19,35 @@ class Command(BaseCommand):
             default=500,
             help="Rows per update batch (default: 500).",
         )
+        parser.add_argument(
+            "--max-rows",
+            type=int,
+            default=None,
+            help="Optional hard cap on scanned rows for staged backfills.",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Report proposed language updates without writing to the database.",
+        )
 
     def handle(self, *args, **options) -> None:
         batch_size = options["batch_size"]
         if not 1 <= batch_size <= 5000:
             raise CommandError("--batch-size must be between 1 and 5000.")
 
+        max_rows = options.get("max_rows")
+        if max_rows is not None and max_rows < 1:
+            raise CommandError("--max-rows must be a positive integer.")
+
         queryset = TextChunk.objects.filter(language_code="und").order_by("pk")
         tenant_id = options.get("tenant")
         if tenant_id:
             queryset = queryset.filter(tenant_id=tenant_id)
+        if max_rows is not None:
+            queryset = queryset[:max_rows]
 
+        dry_run = bool(options.get("dry_run"))
         pending: list[TextChunk] = []
         scanned = 0
         updated = 0
@@ -41,15 +59,22 @@ class Command(BaseCommand):
             chunk.language_code = detected
             pending.append(chunk)
             if len(pending) >= batch_size:
-                TextChunk.objects.bulk_update(pending, ["language_code"], batch_size=batch_size)
+                if not dry_run:
+                    TextChunk.objects.bulk_update(
+                        pending, ["language_code"], batch_size=batch_size
+                    )
                 updated += len(pending)
                 pending.clear()
         if pending:
-            TextChunk.objects.bulk_update(pending, ["language_code"], batch_size=batch_size)
+            if not dry_run:
+                TextChunk.objects.bulk_update(
+                    pending, ["language_code"], batch_size=batch_size
+                )
             updated += len(pending)
 
+        mode = "would update" if dry_run else "updated"
         self.stdout.write(
             self.style.SUCCESS(
-                f"Scanned {scanned} chunks; updated language metadata for {updated}."
+                f"Scanned {scanned} chunks; {mode} language metadata for {updated}."
             )
         )

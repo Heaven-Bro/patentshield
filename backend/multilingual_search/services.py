@@ -123,37 +123,52 @@ def _translate_with_libretranslate(
                     "The configured translation provider returned an unsuccessful response."
                 )
             response_body = bytearray()
-            if hasattr(response, "iter_content"):
+            content_length = response.headers.get("Content-Length") if response.headers else None
+            if content_length:
                 try:
-                    for piece in response.iter_content(chunk_size=65_536):
-                        if not piece:
-                            continue
-                        if isinstance(piece, (bytes, bytearray)):
-                            response_body.extend(piece)
-                            if len(response_body) > max_response_bytes:
-                                raise TranslationProviderError(
-                                    "The translation provider response exceeded the configured size limit."
-                                )
-                except TranslationProviderError:
-                    raise
-                except Exception:
-                    pass
+                    declared_length = int(content_length)
+                except (TypeError, ValueError) as exc:
+                    raise TranslationProviderError(
+                        "The translation provider returned an invalid Content-Length."
+                    ) from exc
+                if declared_length < 0 or declared_length > max_response_bytes:
+                    raise TranslationProviderError(
+                        "The translation provider response exceeded the configured size limit."
+                    )
 
-            if not response_body and hasattr(response, "content") and response.content:
-                if isinstance(response.content, (bytes, bytearray)):
-                    response_body = bytearray(response.content)
-                elif isinstance(response.content, str):
-                    response_body = bytearray(response.content.encode("utf-8"))
-
-        if response_body:
-            result = json.loads(response_body.decode("utf-8"))
-        elif hasattr(response, "json") and callable(response.json):
+            iterator = getattr(response, "iter_content", None)
+            if not callable(iterator):
+                raise TranslationProviderError(
+                    "The translation provider response does not support bounded streaming."
+                )
             try:
-                result = response.json()
-            except Exception:
-                result = {}
-        else:
-            result = {}
+                for piece in iterator(chunk_size=65_536):
+                    if not piece:
+                        continue
+                    if not isinstance(piece, (bytes, bytearray)):
+                        raise TranslationProviderError(
+                            "The translation provider returned a non-byte response chunk."
+                        )
+                    response_body.extend(piece)
+                    if len(response_body) > max_response_bytes:
+                        raise TranslationProviderError(
+                            "The translation provider response exceeded the configured size limit."
+                        )
+            except TranslationProviderError:
+                raise
+            except Exception as exc:
+                raise TranslationProviderError(
+                    "The translation provider response stream was interrupted."
+                ) from exc
+
+        if not response_body:
+            raise TranslationProviderError("The translation provider returned an empty response.")
+        try:
+            result = json.loads(response_body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise TranslationProviderError(
+                "The translation provider returned invalid JSON."
+            ) from exc
     except TranslationProviderError:
         raise
     except (requests.RequestException, ValueError, UnicodeDecodeError) as exc:

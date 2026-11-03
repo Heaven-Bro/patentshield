@@ -109,13 +109,15 @@ class HybridChunker:
 
 
 class BGEEmbedder:
-    """Lazy wrapper for local BAAI/bge-m3 dense embeddings via FastEmbed (ONNX Runtime).
+    """Lazy BGE-M3 dense embedding adapter backed by the official FlagEmbedding API.
 
-    Model inference runs lightweight via FastEmbed without requiring PyTorch/CUDA.
-    A deterministic mock embedding is permitted in development when
-    ``PATENTSHIELD_ALLOW_MOCK_EMBEDDINGS`` is enabled (or ``DEBUG`` is true and
-    the setting is omitted). Production defaults to failing closed rather than
-    silently persisting non-semantic vectors.
+    FastEmbed 0.5.1 does not register BAAI/bge-m3 as a supported TextEmbedding
+    model. FlagEmbedding exposes BGEM3FlagModel directly and supports both the
+    public model ID and an operator-supplied local model directory, which is
+    required by PatentShield's air-gapped model-bundle layout.
+
+    Deterministic mock embeddings remain development-only; model loading or
+    inference failures never silently replace real vectors in production.
     """
 
     MODEL_NAME = "BAAI/bge-m3"
@@ -127,6 +129,7 @@ class BGEEmbedder:
 
     @classmethod
     def model_identity(cls) -> tuple[str, str]:
+        """Return the stable public model ID and pinned deployment revision."""
         return (
             str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME)),
             str(getattr(settings, "BGE_MODEL_REVISION", "main")),
@@ -134,7 +137,7 @@ class BGEEmbedder:
 
     @classmethod
     def embed_texts(cls, texts: list[str]) -> list[list[float]]:
-        """Embed text with FastEmbed BGE-M3, returning normalized 1024-d vectors."""
+        """Embed text with BGE-M3, returning finite normalized 1024-d vectors."""
         if not texts:
             return []
         if any(not isinstance(text, str) or not text.strip() for text in texts):
@@ -143,11 +146,10 @@ class BGEEmbedder:
         model = cls._get_model()
         if model is None:
             if not cls._mock_fallback_allowed():
-                error = cls._load_error
                 raise RuntimeError(
-                    "BGE-M3 weights are unavailable locally for FastEmbed. Install/cache the "
-                    "model or explicitly enable the development-only mock."
-                ) from error
+                    "BGE-M3 weights are unavailable. Install FlagEmbedding and "
+                    "cache the model, or configure PATENTSHIELD_BGE_MODEL_PATH."
+                ) from cls._load_error
             logger.warning(
                 "Using deterministic mock embeddings. These vectors are not "
                 "suitable for semantic retrieval or production data."
@@ -156,18 +158,33 @@ class BGEEmbedder:
 
         try:
             batch_size = int(getattr(settings, "BGE_BATCH_SIZE", 32))
-            # FastEmbed's embed method returns a generator yielding NumPy arrays
-            embeddings_generator = model.embed(texts, batch_size=batch_size)
-            vectors = [vec.tolist() for vec in embeddings_generator]
+            max_length = int(getattr(settings, "PATENTSHIELD_BGE_MAX_LENGTH", 8192))
+            output = model.encode(
+                texts,
+                batch_size=batch_size,
+                max_length=max_length,
+                return_dense=True,
+                return_sparse=False,
+                return_colbert_vecs=False,
+            )
+            vectors_raw = output.get("dense_vecs") if isinstance(output, dict) else None
+            if vectors_raw is None:
+                raise RuntimeError("FlagEmbedding did not return dense_vecs.")
+            if hasattr(vectors_raw, "tolist"):
+                vectors_raw = vectors_raw.tolist()
+            vectors = [
+                vector.tolist() if hasattr(vector, "tolist") else list(vector)
+                for vector in vectors_raw
+            ]
         except Exception:
             # An inference error must not silently replace real embeddings
             # with mock vectors; Celery should retry the failed operation.
-            logger.exception("FastEmbed BGE-M3 inference failed.")
+            logger.exception("FlagEmbedding BGE-M3 inference failed.")
             raise
 
         if len(vectors) != len(texts):
             raise RuntimeError(
-                "FastEmbed returned a different number of vectors than inputs."
+                "FlagEmbedding returned a different number of vectors than inputs."
             )
 
         normalized_vectors: list[list[float]] = []
@@ -179,19 +196,18 @@ class BGEEmbedder:
                 )
             normalized = [float(value) for value in vector]
             if any(not math.isfinite(value) for value in normalized):
-                raise RuntimeError("FastEmbed returned a non-finite vector component.")
-            
-            # Ensure vectors are normalized (L2 norm)
-            magnitude = math.sqrt(sum(v * v for v in normalized))
-            if magnitude > 0 and not math.isclose(magnitude, 1.0, abs_tol=1e-3):
-                normalized = [v / magnitude for v in normalized]
-
+                raise RuntimeError("FlagEmbedding returned a non-finite vector component.")
+            magnitude = math.sqrt(sum(value * value for value in normalized))
+            if magnitude == 0:
+                raise RuntimeError("FlagEmbedding returned a zero-length dense vector.")
+            if not math.isclose(magnitude, 1.0, abs_tol=1e-3):
+                normalized = [value / magnitude for value in normalized]
             normalized_vectors.append(normalized)
         return normalized_vectors
 
     @classmethod
     def _get_model(cls) -> Any | None:
-        """Load FastEmbed TextEmbedding model once without PyTorch dependency."""
+        """Load BGEM3FlagModel once per worker, supporting local offline bundles."""
         if cls._model is not None:
             return cls._model
 
@@ -203,31 +219,43 @@ class BGEEmbedder:
             cls._load_attempted = True
 
             try:
-                from fastembed import TextEmbedding
+                from FlagEmbedding import BGEM3FlagModel
 
+                model_path = str(getattr(settings, "BGE_MODEL_PATH", "")).strip()
                 model_name = str(getattr(settings, "BGE_MODEL_NAME", cls.MODEL_NAME))
-                cls._model = TextEmbedding(model_name=model_name)
+                model_source = model_path or model_name
+                if model_path and not os.path.isdir(model_path):
+                    raise RuntimeError("Configured PATENTSHIELD_BGE_MODEL_PATH is not a directory.")
 
-                # Validate embedding dimensions using a dummy test input
-                probe_vectors = list(cls._model.embed(["probe_test"]))
-                if probe_vectors:
-                    dimensions = len(probe_vectors[0])
-                    if dimensions != cls.DIMENSIONS:
-                        raise RuntimeError(
-                            f"Configured FastEmbed model has {dimensions} dimensions; "
-                            f"PatentShield requires {cls.DIMENSIONS}."
-                        )
+                use_fp16 = bool(getattr(settings, "PATENTSHIELD_BGE_USE_FP16", False))
+                device = str(getattr(settings, "PATENTSHIELD_BGE_DEVICE", "")).strip()
+                max_length = int(getattr(settings, "PATENTSHIELD_BGE_MAX_LENGTH", 8192))
+                if not 128 <= max_length <= 8192:
+                    raise RuntimeError("PATENTSHIELD_BGE_MAX_LENGTH must be between 128 and 8192.")
+
+                kwargs: dict[str, Any] = {
+                    "normalize_embeddings": True,
+                    "use_fp16": use_fp16,
+                    "pooling_method": "cls",
+                    "trust_remote_code": False,
+                    "passage_max_length": max_length,
+                    "batch_size": int(getattr(settings, "BGE_BATCH_SIZE", 32)),
+                }
+                if device:
+                    kwargs["devices"] = [device]
+                cache_dir = str(getattr(settings, "PATENTSHIELD_MODEL_CACHE_DIR", "")).strip()
+                if cache_dir:
+                    kwargs["cache_dir"] = cache_dir
+                cls._model = BGEM3FlagModel(model_source, **kwargs)
             except Exception as exc:
                 cls._model = None
                 cls._load_error = exc
                 logger.warning(
-                    "Could not load local FastEmbed BGE-M3 model: %s",
+                    "Could not load FlagEmbedding BGE-M3 model: %s",
                     type(exc).__name__,
                 )
                 if not cls._mock_fallback_allowed():
-                    raise RuntimeError(
-                        "Unable to load local FastEmbed BGE weights."
-                    ) from exc
+                    raise RuntimeError("Unable to load BGE-M3 model weights.") from exc
                 return None
 
         return cls._model

@@ -1,6 +1,7 @@
 """Phase 5 tests for translation safety, provider behavior, and tenant isolation."""
 
 import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
@@ -50,7 +51,8 @@ class TranslationConfigurationTests(SimpleTestCase):
     def test_provider_uses_bounded_request_without_following_redirects(self, post_mock):
         response = MagicMock()
         response.status_code = 200
-        response.json.return_value = {"translatedText": "无线通信系统"}
+        response.headers = {}
+        response.iter_content.return_value = [json.dumps({"translatedText": "无线通信系统"}, ensure_ascii=False).encode("utf-8")]
         response.__enter__.return_value = response
         post_mock.return_value = response
 
@@ -76,11 +78,75 @@ class TranslationConfigurationTests(SimpleTestCase):
 
         response = MagicMock()
         response.status_code = 302
-        response.json.return_value = {"translatedText": "do not use"}
+        response.headers = {}
+        response.iter_content.return_value = [b'{"translatedText":"do not use"}']
         response.__enter__.return_value = response
         post_mock.return_value = response
         with self.assertRaises(TranslationProviderError):
             _translate_with_libretranslate("patent text", "und", "ja")
+
+
+class TranslationProviderStreamingTests(SimpleTestCase):
+    @override_settings(
+        PATENTSHIELD_TRANSLATION_URL="https://translate.example.test",
+        PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS=5,
+        PATENTSHIELD_TRANSLATION_MAX_RESPONSE_BYTES=1024,
+        PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS=30000,
+    )
+    @patch("multilingual_search.services.requests.post")
+    def test_rejects_oversized_declared_response_before_streaming(self, post_mock):
+        from multilingual_search.services import TranslationProviderError
+
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"Content-Length": "1025"}
+        response.__enter__.return_value = response
+        post_mock.return_value = response
+
+        with self.assertRaises(TranslationProviderError):
+            _translate_with_libretranslate("patent text", "und", "ja")
+        response.iter_content.assert_not_called()
+
+    @override_settings(
+        PATENTSHIELD_TRANSLATION_URL="https://translate.example.test",
+        PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS=5,
+        PATENTSHIELD_TRANSLATION_MAX_RESPONSE_BYTES=1024,
+        PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS=30000,
+    )
+    @patch("multilingual_search.services.requests.post")
+    def test_rejects_chunked_oversized_response(self, post_mock):
+        from multilingual_search.services import TranslationProviderError
+
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {}
+        response.iter_content.return_value = [b"a" * 1024, b"b"]
+        response.__enter__.return_value = response
+        post_mock.return_value = response
+
+        with self.assertRaises(TranslationProviderError):
+            _translate_with_libretranslate("patent text", "und", "ja")
+
+    @override_settings(
+        PATENTSHIELD_TRANSLATION_URL="https://translate.example.test",
+        PATENTSHIELD_TRANSLATION_TIMEOUT_SECONDS=5,
+        PATENTSHIELD_TRANSLATION_MAX_RESPONSE_BYTES=1024,
+        PATENTSHIELD_TRANSLATION_MAX_OUTPUT_CHARS=30000,
+    )
+    @patch("multilingual_search.services.requests.post")
+    def test_stream_failure_does_not_fall_back_to_unbounded_json(self, post_mock):
+        from multilingual_search.services import TranslationProviderError
+
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {}
+        response.iter_content.side_effect = OSError("stream interrupted")
+        response.__enter__.return_value = response
+        post_mock.return_value = response
+
+        with self.assertRaisesRegex(TranslationProviderError, "stream was interrupted"):
+            _translate_with_libretranslate("patent text", "und", "ja")
+        response.json.assert_not_called()
 
 
 class TranslationTenantIsolationTests(TestCase):
