@@ -7,10 +7,12 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.http import HttpResponse
 from django.contrib.sessions.backends.db import SessionStore
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from enterprise_identity.models import (
     IdentityProvider,
@@ -28,10 +30,13 @@ from enterprise_identity.services import (
     filter_visible_matter_queryset,
     matter_access_allowed,
     membership_for_scim,
+    saml_auth,
     session_key_hash,
+    EnterpriseAuthError,
 )
 from enterprise_identity.middleware import ManagedSessionTrackingMiddleware
 from enterprise_identity.serializers import IdentityProviderSerializer
+from enterprise_identity.views import _normalize_scim_scopes
 from tenants.models import Tenant, TenantMembership
 
 User = get_user_model()
@@ -66,6 +71,51 @@ class EnterpriseUrlSafetyTests(SimpleTestCase):
         getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
         self.assertFalse(_safe_external_endpoint("https://idp.example.com/.well-known/openid-configuration"))
         getaddrinfo.assert_not_called()
+
+    def test_saml_endpoints_require_the_same_explicit_host_allowlist(self):
+        with override_settings(PATENTSHIELD_IDP_ALLOWED_HOSTS="login.example.com"):
+            with patch("enterprise_identity.services.socket.getaddrinfo") as getaddrinfo:
+                getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 443))]
+                self.assertTrue(_safe_external_endpoint("https://login.example.com/saml/sso"))
+                self.assertFalse(_safe_external_endpoint("https://unapproved.example.net/saml/sso"))
+                getaddrinfo.assert_called_once()
+
+    def test_saml_login_rejects_unapproved_endpoint_before_constructing_toolkit(self):
+        import sys
+        from types import ModuleType, SimpleNamespace
+        onelogin = ModuleType("onelogin")
+        saml_package = ModuleType("onelogin.saml2")
+        auth_package = ModuleType("onelogin.saml2.auth")
+        auth_package.OneLogin_Saml2_Auth = object
+        onelogin.saml2 = saml_package
+        saml_package.auth = auth_package
+        provider = SimpleNamespace(
+            protocol=IdentityProvider.Protocol.SAML, enabled=True,
+            idp_entity_id="https://idp.example.com/entity", sso_url="https://unapproved.example.net/sso",
+            idp_x509_certificate="-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----",
+        )
+        with patch.dict(sys.modules, {
+            "onelogin": onelogin,
+            "onelogin.saml2": saml_package,
+            "onelogin.saml2.auth": auth_package,
+        }):
+            with patch("enterprise_identity.services._safe_external_endpoint", return_value=False):
+                with self.assertRaises(EnterpriseAuthError):
+                    saml_auth(None, provider)
+
+    def test_scim_scope_validation_rejects_unhashable_and_unknown_values(self):
+        with self.assertRaises(DRFValidationError):
+            _normalize_scim_scopes([{"scope": "Users:write"}])
+        with self.assertRaises(DRFValidationError):
+            _normalize_scim_scopes(["Users:read", "unexpected:admin"])
+        with self.assertRaises(DRFValidationError):
+            _normalize_scim_scopes(["Users:read", "*"])
+        with self.assertRaises(DRFValidationError):
+            _normalize_scim_scopes(["Roles:admin"])
+
+    def test_scim_scope_validation_normalizes_duplicates_and_wildcard(self):
+        self.assertEqual(_normalize_scim_scopes(["Users:read", "Users:read"]), ["Users:read"])
+        self.assertEqual(_normalize_scim_scopes(["*"]), ["*"])
 
     def test_csv_formula_prefixes_are_neutralized(self):
         from enterprise_identity.views import _safe_csv_cell
@@ -131,6 +181,16 @@ class EnterpriseIdentitySecurityTests(TestCase):
         MatterGrant.objects.create(tenant=self.other_tenant, matter_type="patent", matter_id=self.matter_id, subject_user=self.member, level=MatterGrant.Level.ADMIN, created_by=self.user)
         self.assertFalse(matter_access_allowed(tenant=self.other_tenant, user=self.member, matter_type="patent", matter_id=self.matter_id, required="READ"))
 
+    def test_inactive_global_account_is_denied_even_when_tenant_membership_remains_active(self):
+        self.member.is_active = False
+        self.member.save(update_fields=("is_active",))
+        self.assertFalse(matter_access_allowed(tenant=self.tenant, user=self.member, matter_type="patent", matter_id=self.matter_id, required="READ"))
+        qs = filter_visible_matter_queryset(
+            IdentityProvider.objects.for_tenant(self.tenant.pk), tenant=self.tenant,
+            user=self.member, matter_type="provider_test",
+        )
+        self.assertFalse(qs.exists())
+
     def test_collection_filter_hides_acl_protected_objects_without_read_grant(self):
         provider = IdentityProvider.objects.create(
             tenant=self.tenant, slug="public-test-provider", name="Test", protocol=IdentityProvider.Protocol.OIDC,
@@ -181,6 +241,14 @@ class EnterpriseIdentitySecurityTests(TestCase):
         self.member.refresh_from_db()
         self.assertFalse(self.member.is_active)
         self.assertEqual(TenantMembership.objects.get(tenant=self.tenant, user=self.member).status, TenantMembership.Status.ACTIVE)
+
+    def test_scim_cannot_assign_tenant_owner_even_with_elevated_role_scope(self):
+        token = SCIMToken.objects.create(
+            tenant=self.tenant, label="directory", token_hash=hashlib.sha256(b"private-token-owner").hexdigest(),
+            scopes=["*"], created_by=self.user,
+        )
+        with self.assertRaises(DjangoValidationError):
+            membership_for_scim(token=token, user=self.member, active=True, role=TenantMembership.Role.OWNER)
 
     def test_scim_reactivation_restores_only_an_account_disabled_by_scim(self):
         token = SCIMToken.objects.create(

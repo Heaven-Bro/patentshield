@@ -53,6 +53,27 @@ from tenants.permissions import HasTenantAccess, RequireTenantRole
 User = get_user_model()
 _ADMIN_ROLES = (TenantMembership.Role.OWNER, TenantMembership.Role.ADMIN)
 
+_SCIM_ALLOWED_SCOPES = frozenset({"Users:read", "Users:write", "Roles:manage", "Roles:admin", "*"})
+
+def _normalize_scim_scopes(value):
+    """Validate SCIM token scopes without allowing unhashable or oversized input."""
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > len(_SCIM_ALLOWED_SCOPES)
+        or any(not isinstance(item, str) for item in value)
+    ):
+        raise ValidationError({"scopes": "Provide a non-empty list of supported SCIM scope strings."})
+    normalized = list(dict.fromkeys(item.strip() for item in value))
+    if not normalized or any(not item for item in normalized) or set(normalized) - _SCIM_ALLOWED_SCOPES:
+        raise ValidationError({"scopes": "SCIM scopes must be selected from the supported scope list."})
+    if "*" in normalized and len(normalized) > 1:
+        raise ValidationError({"scopes": "The wildcard scope cannot be combined with individual scopes."})
+    if "Roles:admin" in normalized and "Roles:manage" not in normalized and "*" not in normalized:
+        raise ValidationError({"scopes": "Roles:admin requires Roles:manage."})
+    return normalized
+
+
 
 def _tenant(request: Request) -> Tenant:
     tenant = getattr(request, "tenant", None)
@@ -234,10 +255,7 @@ class SCIMTokenListCreateView(EnterpriseAdminAPIView):
         label = str(request.data.get("label", "")).strip()[:120]
         if not label:
             raise ValidationError({"label": "A descriptive token label is required."})
-        scopes = request.data.get("scopes", ["Users:read", "Users:write"])
-        allowed_scopes = {"Users:read", "Users:write", "Roles:manage", "Roles:admin", "*"}
-        if not isinstance(scopes, list) or not scopes or set(scopes) - allowed_scopes:
-            raise ValidationError({"scopes": "SCIM scopes must be selected from the supported scope list."})
+        scopes = _normalize_scim_scopes(request.data.get("scopes", ["Users:read", "Users:write"]))
         if set(scopes) & {"Roles:admin", "*"} and getattr(getattr(request, "tenant_membership", None), "role", None) != TenantMembership.Role.OWNER:
             raise PermissionDenied("Only a tenant owner may issue SCIM tokens with unrestricted or elevated role-management scope.")
         expires_at = request.data.get("expires_at")
@@ -700,7 +718,9 @@ class SCIMUserDetailView(APIView):
                 return _scim_error("This token cannot manage tenant roles.", "insufficientScope", 403)
             if desired_role not in TenantMembership.Role.values:
                 return _scim_error("Unsupported role.", "invalidValue", 400)
-            if desired_role in {TenantMembership.Role.OWNER, TenantMembership.Role.ADMIN} and "Roles:admin" not in scopes:
+            if desired_role == TenantMembership.Role.OWNER:
+                return _scim_error("Tenant ownership must be assigned locally by a tenant owner.", "mutability", 400)
+            if desired_role == TenantMembership.Role.ADMIN and not ({"Roles:admin", "*"} & set(scopes)):
                 return _scim_error("This token cannot assign elevated tenant roles.", "insufficientScope", 403)
         try:
             _apply_scim_user_values(request=request._request, token=token, binding=binding, values=dict(request.data), role=desired_role)

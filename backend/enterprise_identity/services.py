@@ -24,7 +24,7 @@ from django.contrib.sessions.models import Session
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Subquery
 from django.http import HttpRequest
 from django.utils import timezone
 
@@ -395,8 +395,10 @@ def saml_auth(request: HttpRequest, provider: IdentityProvider):
         raise EnterpriseAuthError("This identity provider is not enabled for SAML login.")
     if not provider.idp_entity_id or not provider.sso_url or not provider.idp_x509_certificate:
         raise EnterpriseAuthError("The SAML identity provider configuration is incomplete.")
-    if not _https_url(provider.sso_url, allow_localhost=bool(settings.DEBUG)):
-        raise EnterpriseAuthError("The SAML SSO endpoint must use an approved HTTPS URL.")
+    if not _safe_external_endpoint(provider.sso_url, allow_localhost=bool(settings.DEBUG)):
+        raise EnterpriseAuthError(
+            "The SAML SSO endpoint must use an approved HTTPS host with a public network address."
+        )
     try:
         return OneLogin_Saml2_Auth(_saml_request_data(request), settings=saml_settings_for(provider, request))
     except Exception as exc:
@@ -533,6 +535,10 @@ def _grant_allows(level: str, required: str) -> bool:
 
 
 def matter_access_allowed(*, tenant: Tenant, user, matter_type: str, matter_id, required: str) -> bool:
+    # Worker tasks and AI context resolvers can hold a user instance after the
+    # account is disabled. Do not rely only on request authentication middleware.
+    if not getattr(user, "is_authenticated", False) or not getattr(user, "is_active", False):
+        return False
     membership = TenantMembership.objects.filter(tenant=tenant, user=user, status=TenantMembership.Status.ACTIVE, tenant__status=Tenant.Status.ACTIVE).first()
     if membership is None:
         return False
@@ -551,23 +557,28 @@ def filter_visible_matter_queryset(queryset, *, tenant: Tenant, user, matter_typ
     Objects without an explicit enforced policy retain existing tenant-role access.
     The caller must already constrain ``queryset`` to the active tenant.
     """
+    if not getattr(user, "is_authenticated", False) or not getattr(user, "is_active", False):
+        return queryset.none()
     membership = TenantMembership.objects.filter(
         tenant=tenant, user=user, status=TenantMembership.Status.ACTIVE,
         tenant__status=Tenant.Status.ACTIVE,
     ).first()
     if membership is None:
         return queryset.none()
-    protected_ids = list(MatterPolicy.objects.filter(
+    # Keep authorization filtering in SQL. Materializing every protected matter
+    # id in Python creates avoidable memory spikes for enterprise tenants.
+    protected_ids = MatterPolicy.objects.filter(
         tenant=tenant, matter_type=matter_type, enforce_acl=True,
-    ).values_list("matter_id", flat=True))
-    if not protected_ids:
-        return queryset
+    ).values("matter_id")
     readable_levels = [level for level in MatterGrant.Level.values if _grant_allows(level, "READ")]
     allowed_ids = MatterGrant.objects.filter(
-        tenant=tenant, matter_type=matter_type, matter_id__in=protected_ids,
+        tenant=tenant, matter_type=matter_type,
         level__in=readable_levels,
-    ).filter(Q(subject_user=user) | Q(subject_role=membership.role)).values_list("matter_id", flat=True)
-    return queryset.filter(~Q(**{f"{id_field}__in": protected_ids}) | Q(**{f"{id_field}__in": allowed_ids}))
+    ).filter(Q(subject_user=user) | Q(subject_role=membership.role)).values("matter_id")
+    return queryset.filter(
+        ~Q(**{f"{id_field}__in": Subquery(protected_ids)})
+        | Q(**{f"{id_field}__in": Subquery(allowed_ids)})
+    )
 
 
 def require_matter_access(*, request, matter_type: str, matter_id, required: str = "READ") -> None:
@@ -584,6 +595,12 @@ def membership_for_scim(*, token: SCIMToken, user, active: bool, role: str | Non
     the reason it was disabled. All membership/user/session changes and their
     security audit record are part of one database transaction.
     """
+    if role is not None and role not in TenantMembership.Role.values:
+        raise ValidationError({"role": "Unsupported tenant role."})
+    if role == TenantMembership.Role.OWNER:
+        raise ValidationError({"role": "Tenant ownership must be granted locally, not through SCIM provisioning."})
+    if not isinstance(active, bool):
+        raise ValidationError({"active": "active must be a boolean."})
     with transaction.atomic():
         locked_user = User.objects.select_for_update().get(pk=user.pk)
         membership, created = TenantMembership.objects.select_for_update().get_or_create(
