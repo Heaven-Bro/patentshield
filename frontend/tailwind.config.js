@@ -15,6 +15,11 @@ export default {
           700: "#4338ca",
           900: "#312e81",
         },
+        paper: {
+          DEFAULT: "#f7f5ef",
+          soft: "#fbfaf7",
+          line: "#e3e0d8",
+        },
         navy: {
           800: "#1e293b",
           900: "#0f172a",
@@ -27,6 +32,7 @@ export default {
       },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+        editorial: ["Georgia", "Times New Roman", "serif"],
       },
     },
   },

@@ -27,6 +27,13 @@ const NAV_ITEMS = [
   { id: "enterprise-admin", label: "Enterprise admin", description: "Identity & governance", icon: "admin" },
 ];
 
+const NAV_GROUPS = [
+  { label: "Discover", ids: ["workspace", "multilingual-search"] },
+  { label: "Review & monitor", ids: ["office-actions", "surveillance", "fto"] },
+  { label: "Portfolio", ids: ["landscape", "portfolio-valuation"] },
+  { label: "Governance", ids: ["enterprise-admin"] },
+];
+
 const NAV_ICON_PATHS = {
   workspace: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
   prosecution: "M8 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3 M8 2h8v4H8z M7 12h10 M7 16h7",
@@ -284,50 +291,60 @@ export default function App() {
       : { label: "API connected", tone: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500" };
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900 lg:flex">
-      <aside className="relative z-30 flex w-full flex-col bg-slate-950 text-white shadow-xl shadow-slate-950/10 lg:sticky lg:top-0 lg:h-screen lg:w-[276px] lg:shrink-0">
-        <div className="flex items-center justify-between gap-3 px-5 pb-4 pt-5 lg:block lg:pb-5">
+    <div className="min-h-screen bg-paper text-slate-900 lg:flex">
+      <aside className="relative z-30 flex w-full flex-col border-b border-slate-800 bg-navy-950 text-white lg:sticky lg:top-0 lg:h-screen lg:w-[272px] lg:shrink-0 lg:border-b-0 lg:border-r lg:border-white/10">
+        <div className="flex items-center justify-between gap-3 px-5 pb-4 pt-5 lg:block lg:px-5 lg:pb-5 lg:pt-6">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-indigo-300/20 bg-gradient-to-br from-indigo-500 to-blue-600 text-lg font-black text-white shadow-lg shadow-indigo-950/40">P</div>
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-300/25 bg-indigo-500/15 font-editorial text-xl font-bold text-indigo-100">P</div>
             <div className="min-w-0">
-              <p className="text-[15px] font-bold tracking-tight text-white">PatentShield</p>
-              <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">IP intelligence suite</p>
+              <p className="text-[15px] font-semibold tracking-tight text-white">PatentShield</p>
+              <p className="mt-1 text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-400">Evidence Atlas</p>
             </div>
           </div>
-          <span className="hidden rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300 sm:inline-flex lg:hidden">Secure session</span>
+          <span className="hidden items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 sm:inline-flex lg:hidden"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Secure session</span>
         </div>
 
         <div className="px-4 pb-4 lg:pb-5">
-          <div className="rounded-2xl border border-white/10 bg-white/[0.045] p-3.5 shadow-inner shadow-black/10">
-            <p className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" /> Workspace context
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+            <p className="mb-2 flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" /> Workspace
             </p>
             <TenantSwitcher tenants={tenants} value={activeTenantId} onChange={handleTenantChange} disabled={logoutBusy} dark id="sidebar-tenant-switcher" />
           </div>
         </div>
 
-        <div className="px-4 pb-2 pt-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">Workspaces</div>
-        <nav className="flex gap-1.5 overflow-x-auto px-3 pb-4 lg:flex-1 lg:flex-col lg:overflow-x-visible lg:overflow-y-auto" aria-label="Primary navigation">
-          {NAV_ITEMS.filter((item) => item.id !== "enterprise-admin" || (activeTenant && ["OWNER", "ADMIN"].includes(activeTenant.role))).map((item) => {
-            const isActive = activeSection === item.id;
+        <nav className="flex gap-2 overflow-x-auto px-3 pb-3 lg:flex-1 lg:flex-col lg:gap-4 lg:overflow-x-visible lg:overflow-y-auto lg:px-3 lg:pb-4" aria-label="Primary navigation">
+          {NAV_GROUPS.map((group) => {
+            const groupItems = group.ids
+              .map((id) => NAV_ITEMS.find((item) => item.id === id))
+              .filter((item) => item && (item.id !== "enterprise-admin" || (activeTenant && ["OWNER", "ADMIN"].includes(activeTenant.role))));
+            if (groupItems.length === 0) return null;
             return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveSection(item.id)}
-                aria-current={isActive ? "page" : undefined}
-                aria-pressed={isActive}
-                className={`group relative flex min-w-max items-center gap-3 rounded-xl px-3 py-2.5 text-left text-xs font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 lg:w-full lg:px-3.5 lg:text-sm ${isActive ? "bg-indigo-500/15 text-white shadow-sm ring-1 ring-inset ring-indigo-400/25" : "text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"}`}
-              >
-                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${isActive ? "bg-indigo-500 text-white shadow-md shadow-indigo-950/30" : "bg-white/[0.045] text-slate-400 group-hover:bg-white/10 group-hover:text-slate-200"}`} aria-hidden="true">
-                  <NavIcon name={item.icon} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block whitespace-nowrap">{item.label}</span>
-                  <span className={`mt-0.5 hidden text-[10px] font-normal lg:block ${isActive ? "text-indigo-200" : "text-slate-500"}`}>{item.description}</span>
-                </span>
-                {isActive && <span className="hidden h-1.5 w-1.5 rounded-full bg-indigo-300 lg:block" />}
-              </button>
+              <div key={group.label} className="flex shrink-0 flex-row gap-1 lg:w-full lg:flex-col">
+                <p className="hidden px-3 pb-1 text-[9px] font-bold uppercase tracking-[0.18em] text-slate-500 lg:block">{group.label}</p>
+                {groupItems.map((item) => {
+                  const isActive = activeSection === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setActiveSection(item.id)}
+                      aria-current={isActive ? "page" : undefined}
+                      aria-pressed={isActive}
+                      className={`group relative flex min-w-max items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 lg:w-full lg:gap-3 lg:px-3 lg:py-2.5 lg:text-sm ${isActive ? "bg-indigo-400/15 text-white ring-1 ring-inset ring-indigo-300/20" : "text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"}`}
+                    >
+                      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${isActive ? "bg-indigo-500 text-white" : "bg-white/[0.045] text-slate-400 group-hover:text-slate-200"}`} aria-hidden="true">
+                        <NavIcon name={item.icon} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block whitespace-nowrap">{item.label}</span>
+                        <span className={`mt-0.5 hidden text-[10px] font-normal lg:block ${isActive ? "text-indigo-200" : "text-slate-500"}`}>{item.description}</span>
+                      </span>
+                      {isActive && <span className="hidden h-1.5 w-1.5 rounded-full bg-indigo-300 lg:block" />}
+                    </button>
+                  );
+                })}
+              </div>
             );
           })}
         </nav>
@@ -345,13 +362,13 @@ export default function App() {
       </aside>
 
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_2px_rgba(15,23,42,0.03)] backdrop-blur-xl">
+        <header className="sticky top-0 z-20 border-b border-paper-line bg-paper-soft/95 shadow-[0_1px_2px_rgba(15,23,42,0.025)] backdrop-blur">
           <div className="flex flex-col gap-3 px-4 py-3.5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">
-                <span>PatentShield</span><span className="text-slate-300">/</span><span className="text-indigo-600">{activeNavItem.label}</span>
+              <div className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.18em] text-slate-400">
+                <span>Evidence Atlas</span><span className="text-slate-300">/</span><span className="text-indigo-700">{activeNavItem.label}</span>
               </div>
-              <h1 className="mt-1 text-lg font-bold tracking-tight text-slate-950 sm:text-xl">{activeNavItem.heading || activeNavItem.label}</h1>
+              <h1 className="mt-1 font-editorial text-xl font-medium tracking-tight text-slate-950 sm:text-2xl">{activeNavItem.heading || activeNavItem.label}</h1>
               <p className="mt-0.5 hidden text-xs text-slate-500 sm:block">{activeTenant?.name ? `${activeTenant.name} · ` : ""}{activeNavItem.summary || activeNavItem.description}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5 sm:justify-between lg:justify-end">
@@ -375,7 +392,7 @@ export default function App() {
           {logoutError && <div className="border-t border-rose-200 bg-rose-50 px-4 py-2 text-center text-xs text-rose-800" role="alert">{logoutError}</div>}
         </header>
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 bg-paper">
           {tenants.length === 0 ? (
             <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
