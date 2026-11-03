@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, apiRequest, downloadArtifact } from "../lib/apiClient";
 import { useDocumentStore } from "../stores/documentStore";
@@ -47,12 +47,15 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
   const [revisions, setRevisions] = useState([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const chartsRequestSequence = useRef(0);
+  const chartRequestSequence = useRef(0);
 
   const chartSnapshot = chart?.snapshot || null;
   const rows = useMemo(() => chartSnapshot?.rows || [], [chartSnapshot]);
 
   const refreshCharts = useCallback(async () => {
     if (!analysisId || !tenantId) return;
+    const requestSequence = ++chartsRequestSequence.current;
     setLoading(true);
     setError("");
     try {
@@ -60,6 +63,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         `/api/v1/reports/claim-charts/?analysis_id=${encodeURIComponent(analysisId)}`,
         { tenantId },
       );
+      if (requestSequence !== chartsRequestSequence.current) return;
       const nextCharts = Array.isArray(result?.results) ? result.results : [];
       setCharts(nextCharts);
       setChartId((current) => (
@@ -69,15 +73,19 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
       ));
       if (nextCharts.length === 0) setChart(null);
     } catch (loadError) {
+      if (requestSequence !== chartsRequestSequence.current) return;
       setError(loadError instanceof Error ? loadError.message : "Could not load claim charts.");
     } finally {
-      setLoading(false);
+      if (requestSequence === chartsRequestSequence.current) setLoading(false);
     }
   }, [analysisId, tenantId]);
 
   const loadChart = useCallback(async (requestedChartId) => {
+    const requestSequence = ++chartRequestSequence.current;
     if (!requestedChartId || !tenantId) {
       setChart(null);
+      setRevisions([]);
+      setBusy("");
       return;
     }
     setBusy("load");
@@ -87,6 +95,7 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         `/api/v1/reports/claim-charts/${requestedChartId}/`,
         { tenantId },
       );
+      if (requestSequence !== chartRequestSequence.current) return;
       if (result?.chart?.analysis_id !== analysisId) {
         throw new Error("The selected claim chart does not belong to this analysis.");
       }
@@ -103,11 +112,13 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         `/api/v1/reports/claim-charts/${requestedChartId}/revisions/`,
         { tenantId },
       );
+      if (requestSequence !== chartRequestSequence.current) return;
       setRevisions(Array.isArray(history?.results) ? history.results : []);
     } catch (loadError) {
+      if (requestSequence !== chartRequestSequence.current) return;
       setError(loadError instanceof Error ? loadError.message : "Could not load the claim chart.");
     } finally {
-      setBusy("");
+      if (requestSequence === chartRequestSequence.current) setBusy("");
     }
   }, [analysisId, tenantId]);
 
@@ -367,8 +378,19 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
         )}
       </div>
 
+      {busy === "load" && <p className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-900" role="status">Loading selected chart and revision history…</p>}
+      {chart && !canReview && <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">View-only access: chart decisions, notes, and exports are disabled for your current role.</p>}
+
       {chart && (
         <>
+          <div className="mt-4 flex flex-col gap-2 rounded-xl border border-paper-line bg-paper-soft p-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h3 className="break-words text-sm font-semibold text-slate-900">{chart.title || "Untitled claim chart"}</h3>
+              {chart.description && <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-slate-600">{chart.description}</p>}
+              <p className="mt-1 text-[10px] text-slate-500">Analysis {chart.analysis_id} · {rows.length} persisted limitation rows</p>
+            </div>
+            <span className="inline-flex w-fit shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-bold uppercase text-slate-600">{formatStatus(chart.status)}</span>
+          </div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div>
               <p className="text-sm font-semibold text-slate-800">Export revision {chart.revision}</p>
@@ -421,7 +443,10 @@ export default function ClaimChartWorkspace({ analysisId, tenantId, role }) {
                         {(row.evidence || []).map((evidence) => (
                           <article key={evidence.evidence_id} className="mb-3 rounded-lg border border-slate-200 p-3 last:mb-0">
                             <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase text-slate-500">
-                              <span>{evidence.source_publication_number || evidence.source_patent_id || "Source not identified"}</span>
+                              <span>{[evidence.source_publication_number, evidence.source_patent_title]
+                                .filter(Boolean).join(" · ") || evidence.source_patent_id || "Source not identified"}</span>
+                              {evidence.source_jurisdiction && <span>{evidence.source_jurisdiction}</span>}
+                              {evidence.source_version_number && <span>Version {evidence.source_version_number}</span>}
                               {evidence.page_number && <span>Page {evidence.page_number}</span>}
                               <span className={evidence.quote_verified ? "text-emerald-700" : "text-amber-700"}>{evidence.quote_verified ? "✓ Quote verified" : "⚠ Quote unverified"}</span>
                             </div>

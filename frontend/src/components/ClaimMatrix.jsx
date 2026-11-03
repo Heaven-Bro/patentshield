@@ -285,6 +285,18 @@ export default function ClaimMatrix({ className = "", patents = [] }) {
                                     Page {evidence.page_index + 1} · View in PDF
                                   </span>
                                 )}
+                                {sourceDocument && (
+                                  <span className="mt-1 block text-[10px] font-medium text-slate-500">
+                                    {[sourceDocument.patent?.publication_number, sourceDocument.patent?.title]
+                                      .filter(Boolean).join(" · ") || "Source patent"}
+                                    {sourceDocument.version?.version_number
+                                      ? ` · Version ${sourceDocument.version.version_number}`
+                                      : ""}
+                                  </span>
+                                )}
+                                {evidence.source_section && (
+                                  <span className="mt-1 block text-[10px] text-slate-500">Section: {displayText(evidence.source_section)}</span>
+                                )}
                               </button>
                               {!sourceDocument && hasPage && (
                                 <p className="text-[10px] text-slate-500">No tenant-local PDF is linked to this citation.</p>
