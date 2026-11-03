@@ -11,7 +11,7 @@ import LandscapeAnalytics from "./components/LandscapeAnalytics";
 import EnterpriseAdminConsole from "./components/EnterpriseAdminConsole";
 import PortfolioValuation from "./components/PortfolioValuation";
 import TenantSwitcher from "./components/TenantSwitcher";
-import { ApiError, apiRequest, bootstrapCsrfToken } from "./lib/apiClient";
+import { ApiError, apiRequest, bootstrapCsrfToken, requireResultsArray } from "./lib/apiClient";
 import { useAuthStore } from "./stores/authStore";
 import { useDocumentStore } from "./stores/documentStore";
 import { useMatrixStore } from "./stores/matrixStore";
@@ -88,7 +88,7 @@ export default function App() {
       await bootstrapCsrfToken({ force: true });
       const session = await apiRequest("/api/v1/auth/me/");
       const membershipPayload = await apiRequest("/api/v1/tenants/");
-      setSession(session.user, membershipPayload.results || []);
+      setSession(session.user, requireResultsArray(membershipPayload, "tenant list"));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setAnonymous();
@@ -109,7 +109,7 @@ export default function App() {
         await bootstrapCsrfToken();
         const session = await apiRequest("/api/v1/auth/me/");
         const membershipPayload = await apiRequest("/api/v1/tenants/");
-        if (active) setSession(session.user, membershipPayload.results || []);
+        if (active) setSession(session.user, requireResultsArray(membershipPayload, "tenant list"));
       } catch (error) {
         if (!active) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -137,7 +137,7 @@ export default function App() {
         signal,
       });
       if (signal?.aborted || useAuthStore.getState().activeTenantId !== activeTenantId) return;
-      setPatents(Array.isArray(response.results) ? response.results : []);
+      setPatents(requireResultsArray(response, "patent library"));
       setApiStatus("online");
     } catch (error) {
       if (error?.name === "AbortError" || signal?.aborted) return;
@@ -231,7 +231,7 @@ export default function App() {
       });
       const session = await apiRequest("/api/v1/auth/me/");
       const membershipPayload = await apiRequest("/api/v1/tenants/");
-      setSession(session.user, membershipPayload.results || []);
+      setSession(session.user, requireResultsArray(membershipPayload, "tenant list"));
     } catch (error) {
       setLoginError(
         error instanceof Error

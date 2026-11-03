@@ -1,5 +1,6 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000")
   .replace(/\/+$/, "");
+const API_READ_TIMEOUT_MS = 30_000;
 
 let csrfToken = "";
 let csrfRequest = null;
@@ -22,6 +23,53 @@ export class ApiError extends Error {
 }
 
 /**
+ * A successful HTTP response that violates a known collection contract.
+ */
+export class ApiResponseShapeError extends Error {
+  /** @param {string} resourceName */
+  constructor(resourceName) {
+    super(`The ${resourceName} response was not in the expected format. Please refresh and try again.`);
+    this.name = "ApiResponseShapeError";
+  }
+}
+
+/**
+ * Read a collection envelope without treating malformed success as no records.
+ * @param {unknown} payload
+ * @param {string} [resourceName]
+ * @returns {any[]}
+ */
+export function requireResultsArray(payload, resourceName = "collection") {
+  if (!Array.isArray(payload?.results)) {
+    throw new ApiResponseShapeError(resourceName);
+  }
+  return payload.results;
+}
+
+function createRequestDeadline(callerSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timerId = null;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) forwardAbort();
+  else callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+  if (timeoutMs > 0) {
+    timerId = globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      if (timerId !== null) globalThis.clearTimeout(timerId);
+      callerSignal?.removeEventListener("abort", forwardAbort);
+    },
+  };
+}
+
+/**
  * Bootstrap a CSRF token. A single in-flight request is shared by concurrent
  * callers so React StrictMode does not issue duplicate bootstrap requests.
  * @param {{force?: boolean}} [options]
@@ -32,22 +80,33 @@ export async function bootstrapCsrfToken({ force = false } = {}) {
   if (!force && csrfRequest) return csrfRequest;
 
   csrfRequest = (async () => {
-    const response = await fetch(`${API_BASE_URL}/api/v1/auth/csrf/`, {
-      method: "GET",
-      credentials: "include",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-    const payload = await parseResponse(response);
-    if (!response.ok || typeof payload?.csrfToken !== "string") {
-      throw new ApiError(
-        "Could not initialize browser security. Check the backend and CORS settings.",
-        response.status,
-        payload,
-      );
+    const deadline = createRequestDeadline(null, API_READ_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/auth/csrf/`, {
+        method: "GET",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        signal: deadline.signal,
+      });
+      const payload = await parseResponse(response);
+      if (!response.ok || typeof payload?.csrfToken !== "string") {
+        throw new ApiError(
+          "Could not initialize browser security. Check the backend and CORS settings.",
+          response.status,
+          payload,
+        );
+      }
+      csrfToken = payload.csrfToken;
+      return csrfToken;
+    } catch (requestError) {
+      if (deadline.didTimeout()) {
+        throw new ApiError("Browser security initialization timed out. Please try again.", 0);
+      }
+      throw requestError;
+    } finally {
+      deadline.cleanup();
     }
-    csrfToken = payload.csrfToken;
-    return csrfToken;
   })();
 
   try {
@@ -80,7 +139,7 @@ export function apiUrl(path) {
  * The tenant ID is an explicit selector, never an authorization credential;
  * the backend must still verify active membership on every tenant-scoped API.
  * @param {string} path
- * @param {{method?: string, tenantId?: string | null, body?: unknown, headers?: Record<string,string>, signal?: AbortSignal}} [options]
+ * @param {{method?: string, tenantId?: string | null, body?: unknown, headers?: Record<string,string>, signal?: AbortSignal, timeoutMs?: number}} [options]
  * @returns {Promise<any>}
  */
 export async function apiRequest(path, options = {}) {
@@ -117,21 +176,37 @@ export async function apiRequest(path, options = {}) {
     headers["X-CSRFToken"] = csrfToken;
   }
 
-  const response = await fetch(apiUrl(path), {
-    method,
-    credentials: "include",
-    headers,
-    body,
-    signal: options.signal,
-    cache: "no-store",
-  });
-  const payload = await parseResponse(response);
-  updateCsrfToken(payload?.csrfToken);
+  const timeoutMs = options.timeoutMs === undefined
+    ? (method === "GET" ? API_READ_TIMEOUT_MS : 0)
+    : Number(options.timeoutMs);
+  const deadline = createRequestDeadline(
+    options.signal,
+    Number.isFinite(timeoutMs) ? timeoutMs : 0,
+  );
+  try {
+    const response = await fetch(apiUrl(path), {
+      method,
+      credentials: "include",
+      headers,
+      body,
+      signal: deadline.signal,
+      cache: "no-store",
+    });
+    const payload = await parseResponse(response);
+    updateCsrfToken(payload?.csrfToken);
 
-  if (!response.ok) {
-    throw new ApiError(extractErrorMessage(payload, response.status), response.status, payload);
+    if (!response.ok) {
+      throw new ApiError(extractErrorMessage(payload, response.status), response.status, payload);
+    }
+    return payload;
+  } catch (requestError) {
+    if (deadline.didTimeout()) {
+      throw new ApiError("This request timed out. Please try again.", 0);
+    }
+    throw requestError;
+  } finally {
+    deadline.cleanup();
   }
-  return payload;
 }
 
 /**
