@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import DocumentUploadPanel from "./DocumentUploadPanel";
 import { apiRequest } from "../lib/apiClient";
@@ -63,7 +63,8 @@ function patentSearchText(patent) {
  * Search and status filters operate only on the already authorized list response.
  *
  * @param {{tenant: object|null, patents: object[], loading: boolean, error: string,
- * onRetry: () => void, onRefresh: () => void, onUploadSubmitted?: (payload: object) => void}} props
+ * onRetry: () => void, onRefresh: () => void, onUploadSubmitted?: (payload: object) => void,
+ * onOpenDocument?: (patent: object, version: object) => void}} props
  */
 export default function PatentsDashboard({
   tenant,
@@ -73,13 +74,23 @@ export default function PatentsDashboard({
   onRetry,
   onRefresh,
   onUploadSubmitted,
+  onOpenDocument,
 }) {
   const [retryingVersionId, setRetryingVersionId] = useState(null);
   const [processingActionError, setProcessingActionError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [selectedPatentId, setSelectedPatentId] = useState("");
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [claims, setClaims] = useState([]);
+  const [claimsLoading, setClaimsLoading] = useState(false);
+  const [claimsError, setClaimsError] = useState("");
   const capabilities = ROLE_CAPABILITIES[tenant?.role] || [];
   const canUpload = UPLOAD_ROLES.has(tenant?.role);
+  const selectedPatent = patents.find((patent) => patent.id === selectedPatentId) || null;
+  const selectedVersion = selectedPatent?.versions?.find(
+    (version) => version.id === selectedVersionId,
+  ) || null;
 
   const statusOptions = useMemo(
     () => [...new Set(patents.map((patent) => String(patent.status || "UPLOADED")))].sort(),
@@ -94,6 +105,63 @@ export default function PatentsDashboard({
       return matchesStatus && matchesQuery;
     });
   }, [patents, query, statusFilter]);
+
+  useEffect(() => {
+    if (!selectedPatentId || patents.some((patent) => patent.id === selectedPatentId)) return;
+    setSelectedPatentId("");
+    setSelectedVersionId("");
+  }, [patents, selectedPatentId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setClaims([]);
+    setClaimsError("");
+    if (!tenant?.id || !selectedPatent || !selectedVersion) {
+      setClaimsLoading(false);
+      return () => controller.abort();
+    }
+    if (selectedVersion.extraction_status !== "EXTRACTED") {
+      setClaimsLoading(false);
+      return () => controller.abort();
+    }
+
+    setClaimsLoading(true);
+    apiRequest(
+      `/api/v1/patents/${selectedPatent.id}/claims/?document_version_id=${encodeURIComponent(selectedVersion.id)}`,
+      { tenantId: tenant.id, signal: controller.signal },
+    )
+      .then((payload) => {
+        if (!controller.signal.aborted) {
+          setClaims(Array.isArray(payload.results) ? payload.results : []);
+        }
+      })
+      .catch((requestError) => {
+        if (!controller.signal.aborted && requestError?.name !== "AbortError") {
+          setClaimsError(
+            requestError instanceof Error ? requestError.message : "Could not load extracted claims.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setClaimsLoading(false);
+      });
+    return () => controller.abort();
+  }, [tenant?.id, selectedPatent, selectedVersion]);
+
+  useEffect(() => {
+    if (!selectedPatent || !selectedPatent.versions?.length) {
+      setSelectedVersionId("");
+      return;
+    }
+    if (!selectedPatent.versions.some((version) => version.id === selectedVersionId)) {
+      setSelectedVersionId(selectedPatent.versions[0].id);
+    }
+  }, [selectedPatent, selectedVersionId]);
+
+  function inspectPatent(patent) {
+    setSelectedPatentId(patent.id);
+    setSelectedVersionId(patent.versions?.[0]?.id || "");
+  }
 
   async function retryProcessing(patent, version) {
     if (!tenant?.id || !patent?.id || !version?.id || retryingVersionId) return;
@@ -114,8 +182,14 @@ export default function PatentsDashboard({
       );
     } finally {
       setRetryingVersionId(null);
-    }
   }
+}
+
+function formatConfidence(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "Not reported";
+  const percent = value <= 1 ? value * 100 : value;
+  return `${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+}
 
   function clearFilters() {
     setQuery("");
@@ -333,6 +407,16 @@ export default function PatentsDashboard({
                     ) : (
                       <p className="mt-3 text-xs text-slate-500">No document versions are included in this record.</p>
                     )}
+                    <div className="mt-4 flex justify-end border-t border-slate-100 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => inspectPatent(patent)}
+                        aria-expanded={selectedPatentId === patent.id}
+                        className="ps-button-secondary min-h-9"
+                      >
+                        {selectedPatentId === patent.id ? "Document details open" : "Review document details"}
+                      </button>
+                    </div>
                   </article>
                 );
               })}
@@ -340,6 +424,108 @@ export default function PatentsDashboard({
           )}
         </div>
       </section>
+
+      {selectedPatent && (
+        <section className="overflow-hidden rounded-xl border border-paper-line bg-white shadow-[0_1px_2px_rgba(15,23,42,0.035)]" aria-labelledby="selected-document-heading">
+          <header className="flex flex-col gap-3 border-b border-paper-line bg-paper-soft px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
+            <div className="min-w-0">
+              <p className="text-[9px] font-bold uppercase tracking-[0.17em] text-indigo-700">Document intelligence</p>
+              <h3 id="selected-document-heading" className="mt-1 break-words font-editorial text-xl text-slate-950">{selectedPatent.title || "Untitled patent"}</h3>
+              <p className="mt-1 text-xs text-slate-600">
+                {[selectedPatent.jurisdiction, selectedPatent.publication_number, selectedPatent.application_number]
+                  .filter(Boolean).join(" · ") || "Patent identifiers were not provided"}
+              </p>
+            </div>
+            <button type="button" onClick={() => { setSelectedPatentId(""); setSelectedVersionId(""); }} className="ps-button-secondary shrink-0">Close details</button>
+          </header>
+          <div className="grid gap-5 p-4 sm:p-5 xl:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.2fr)]">
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-paper-line bg-paper-soft p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500">Record status</p>
+                  <p className="mt-1 text-xs font-semibold text-slate-800">{displayStatus(selectedPatent.status)}</p>
+                </div>
+                <div className="rounded-lg border border-paper-line bg-paper-soft p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500">Document versions</p>
+                  <p className="mt-1 text-xs font-semibold tabular-nums text-slate-800">{selectedPatent.versions?.length || 0}</p>
+                </div>
+              </div>
+              {selectedPatent.abstract && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-800">Abstract</h4>
+                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">{selectedPatent.abstract}</p>
+                </div>
+              )}
+              <div>
+                <label htmlFor="library-version" className="text-xs font-semibold text-slate-800">Source version</label>
+                <select
+                  id="library-version"
+                  value={selectedVersionId}
+                  onChange={(event) => setSelectedVersionId(event.target.value)}
+                  className="ps-input mt-1"
+                  disabled={!selectedPatent.versions?.length}
+                >
+                  {(selectedPatent.versions || []).map((version) => (
+                    <option key={version.id} value={version.id}>
+                      Version {version.version_number} · {displayStatus(version.extraction_status)}
+                    </option>
+                  ))}
+                </select>
+                {selectedVersion && (
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 rounded-lg border border-paper-line p-3 text-xs">
+                    <dt className="text-slate-500">Extraction</dt><dd className="text-right font-medium text-slate-800">{displayStatus(selectedVersion.extraction_status)}</dd>
+                    <dt className="text-slate-500">Text indexing</dt><dd className="text-right font-medium text-slate-800">{displayStatus(selectedVersion.text_indexing_status)}</dd>
+                    <dt className="text-slate-500">Schematic indexing</dt><dd className="text-right font-medium text-slate-800">{displayStatus(selectedVersion.schematic_indexing_status)}</dd>
+                    <dt className="text-slate-500">Pages</dt><dd className="text-right font-medium tabular-nums text-slate-800">{selectedVersion.page_count ?? "Not reported"}</dd>
+                    <dt className="text-slate-500">Added</dt><dd className="text-right font-medium text-slate-800">{formatDate(selectedVersion.created_at)}</dd>
+                  </dl>
+                )}
+                {selectedVersion?.extraction_error_code && (
+                  <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">Extraction reported code: {selectedVersion.extraction_error_code}</p>
+                )}
+                {selectedVersion?.extraction_status === "EXTRACTED" && (
+                  <button type="button" onClick={() => onOpenDocument?.(selectedPatent, selectedVersion)} className="ps-button-primary mt-3 w-full">
+                    Open in review workspace
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-baseline justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-900">Extracted claims</h4>
+                  <p className="mt-0.5 text-xs text-slate-500">Claims are shown only for the selected extracted document version.</p>
+                </div>
+                {!claimsLoading && !claimsError && <span className="text-xs tabular-nums text-slate-500">{claims.length} available</span>}
+              </div>
+              {claimsLoading ? (
+                <p className="mt-3 rounded-lg border border-paper-line bg-paper-soft p-4 text-sm text-slate-500" role="status">Loading claims for this version…</p>
+              ) : claimsError ? (
+                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="alert">{claimsError}</p>
+              ) : selectedVersion?.extraction_status !== "EXTRACTED" ? (
+                <p className="mt-3 rounded-lg border border-dashed border-paper-line bg-paper-soft p-4 text-sm text-slate-500">Claims are not available until this version finishes extraction.</p>
+              ) : claims.length === 0 ? (
+                <p className="mt-3 rounded-lg border border-dashed border-paper-line bg-paper-soft p-4 text-sm text-slate-500">No extracted claims were returned for this version.</p>
+              ) : (
+                <ol className="mt-3 max-h-[34rem] space-y-2 overflow-auto pr-1">
+                  {claims.map((claim) => (
+                    <li key={claim.id} className="rounded-lg border border-paper-line bg-paper-soft p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900">Claim {claim.claim_number}</span>
+                        <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-600">{displayStatus(claim.claim_type)}</span>
+                        {claim.source_page_index !== null && claim.source_page_index !== undefined && <span className="text-[10px] text-slate-500">Source page {claim.source_page_index + 1}</span>}
+                        {claim.extraction_confidence !== null && claim.extraction_confidence !== undefined && <span className="text-[10px] text-slate-500">Extraction confidence {formatConfidence(claim.extraction_confidence)}</span>}
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{claim.claim_text}</p>
+                      {claim.depends_on_claim_number && <p className="mt-2 text-[10px] text-slate-500">Depends on claim {claim.depends_on_claim_number}</p>}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
     </main>
   );
 }

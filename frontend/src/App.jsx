@@ -75,6 +75,7 @@ export default function App() {
   const [apiStatus, setApiStatus] = useState("checking");
   const [refreshCounter, setRefreshCounter] = useState(0);
   const [activeSection, setActiveSection] = useState("workspace");
+  const [documentSelectionRequest, setDocumentSelectionRequest] = useState(null);
 
   const activeTenant = useMemo(
     () => tenants.find((tenant) => tenant.id === activeTenantId) || null,
@@ -191,6 +192,17 @@ export default function App() {
     setRefreshCounter((value) => value + 1);
   }, []);
 
+  function openDocumentInReview(patent, version) {
+    setDocumentSelectionRequest({
+      tenantId: activeTenantId,
+      patentId: patent.id,
+      versionId: version.id,
+    });
+    window.setTimeout(() => {
+      document.getElementById("analysis-console")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, 0);
+  }
+
   const resetWorkspaceState = useCallback(() => {
     useDocumentStore.getState().setDocumentContext(null, null);
     useMatrixStore.getState().setAnalysisData({});
@@ -203,6 +215,7 @@ export default function App() {
     setPatentsLoading(false);
     setApiStatus("checking");
     setActiveSection("workspace");
+    setDocumentSelectionRequest(null);
     resetWorkspaceState();
     setActiveTenant(tenantId);
   }
@@ -237,11 +250,13 @@ export default function App() {
       await apiRequest("/api/v1/auth/logout/", { method: "POST" });
       setAnonymous();
       setPatents([]);
+      setDocumentSelectionRequest(null);
       resetWorkspaceState();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setAnonymous();
         setPatents([]);
+        setDocumentSelectionRequest(null);
         resetWorkspaceState();
       } else {
         setLogoutError(
@@ -425,8 +440,8 @@ export default function App() {
             <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
           ) : (
             <>
-              <PatentsDashboard tenant={activeTenant} patents={patents} loading={patentsLoading} error={patentsError} onRetry={refreshPatentLibrary} onRefresh={refreshPatentLibrary} onUploadSubmitted={refreshPatentLibrary} />
-              <AnalysisConsole key={activeTenant.id} tenant={activeTenant} patents={patents} onRefreshPatents={refreshPatentLibrary} />
+              <PatentsDashboard tenant={activeTenant} patents={patents} loading={patentsLoading} error={patentsError} onRetry={refreshPatentLibrary} onRefresh={refreshPatentLibrary} onUploadSubmitted={refreshPatentLibrary} onOpenDocument={openDocumentInReview} />
+              <AnalysisConsole key={activeTenant.id} tenant={activeTenant} patents={patents} onRefreshPatents={refreshPatentLibrary} documentSelectionRequest={documentSelectionRequest} />
             </>
           )}
         </div>

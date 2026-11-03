@@ -46,9 +46,9 @@ function statusClass(value) {
 /**
  * Authenticated claim analysis console with recoverable WebSocket progress,
  * authoritative REST polling, and tenant-scoped report downloads.
- * @param {{tenant:object, patents:Array<Record<string, any>>, onRefreshPatents?:()=>void}} props
+ * @param {{tenant:object, patents:Array<Record<string, any>>, onRefreshPatents?:()=>void, documentSelectionRequest?:{tenantId:string,patentId:string,versionId:string}|null}} props
  */
-export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
+export default function AnalysisConsole({ tenant, patents, onRefreshPatents, documentSelectionRequest = null }) {
   const tenantId = tenant?.id || null;
   const canRunAnalysis = RUN_ROLES.has(tenant?.role);
 
@@ -95,6 +95,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     [claims, selectedClaimId],
   );
   const workspaceAnalysisIdRef = useRef(null);
+  const lastDocumentSelectionRequestRef = useRef(null);
   const canStartAnalysis = canRunAnalysis && selectedPatent?.status === "INDEXED";
 
   const {
@@ -150,6 +151,35 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [tenantId, patents, selectedPatentId, selectedVersionId]);
+
+  useEffect(() => {
+    if (
+      !documentSelectionRequest
+      || documentSelectionRequest.tenantId !== tenantId
+      || lastDocumentSelectionRequestRef.current === documentSelectionRequest
+    ) return;
+    const patent = patents.find((item) => item.id === documentSelectionRequest.patentId);
+    const version = patent?.versions?.find((item) => item.id === documentSelectionRequest.versionId);
+    if (!patent || !version || version.extraction_status !== "EXTRACTED") return;
+
+    lastDocumentSelectionRequestRef.current = documentSelectionRequest;
+    workspaceAnalysisIdRef.current = null;
+    setActiveAnalysisId(null);
+    setAnalysisStatus(null);
+    setAnalysisErrorCode(null);
+    setExportStatus("NOT_REQUESTED");
+    setExportErrorCode(null);
+    setArtifactsAvailable({ pdf: false, json: false });
+    setSelectedPatentId(patent.id);
+    setSelectedVersionId(version.id);
+    setSelectedClaimId("");
+    setConsoleError("");
+    setAnalysisData({});
+    setDocumentContext(patent, version);
+    window.setTimeout(() => {
+      document.getElementById("analysis-console")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, 0);
+  }, [documentSelectionRequest, tenantId, patents, setAnalysisData, setDocumentContext]);
 
   // Evidence clicks may intentionally switch the visible PDF away from the
   // target claim. Do not let the patent-list polling effect switch it back.
@@ -508,7 +538,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
   if (!tenantId) return null;
 
   return (
-    <section className="ps-page !space-y-4 !py-3" aria-label="Analysis execution and reports">
+    <section id="analysis-console" className="ps-page !space-y-4 !py-3" aria-label="Analysis execution and reports">
       <div className="ps-panel sm:p-6">
         <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
           <div>
@@ -645,9 +675,9 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents }) {
         </section>
       </div>
 
-      {activeAnalysisId && (
+      {(activeAnalysisId || selectedVersion) && (
         <div className="mt-5 h-[min(78vh,900px)] min-h-[520px]">
-          <WorkspaceLayout patents={patents} className="!h-full" />
+          <WorkspaceLayout patents={patents} className="!h-full" analysisAvailable={Boolean(activeAnalysisId)} />
         </div>
       )}
       {activeAnalysisId && ANALYSIS_SUCCESS.has(analysisStatus) && (

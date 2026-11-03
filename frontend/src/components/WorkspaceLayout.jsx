@@ -23,9 +23,9 @@ function formatMetric(value) {
 /**
  * Dual-pane PatentShield review workspace: PDF viewer on the left and analysis
  * matrix with screening priority metrics on the right.
- * @param {{pdfFile?: string | File | Blob | object | null, className?: string, patents?: Array<Record<string, any>>}} props
+ * @param {{pdfFile?: string | File | Blob | object | null, className?: string, patents?: Array<Record<string, any>>, analysisAvailable?: boolean}} props
  */
-export default function WorkspaceLayout({ pdfFile = null, className = "", patents = [] }) {
+export default function WorkspaceLayout({ pdfFile = null, className = "", patents = [], analysisAvailable = true }) {
   const screeningMetrics = useMatrixStore((state) => state.screeningMetrics);
   const score = screeningMetrics?.screening_priority_score;
   const hasScore = typeof score === "number" && Number.isFinite(score);
@@ -44,13 +44,15 @@ export default function WorkspaceLayout({ pdfFile = null, className = "", patent
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-600">
-                Screening overview
+                {analysisAvailable ? "Screening overview" : "Source document review"}
               </p>
               <h1 className="mt-1 text-lg font-bold tracking-tight text-slate-950">
-                Patent evidence review
+                {analysisAvailable ? "Patent evidence review" : "Patent document preview"}
               </h1>
               <p className="mt-1 max-w-md text-xs leading-5 text-slate-500">
-                Use verified source passages to review each technical limitation. This score prioritizes review; it is not a legal conclusion.
+                {analysisAvailable
+                  ? "Use verified source passages to review each technical limitation. This score prioritizes review; it is not a legal conclusion."
+                  : "Review the selected extracted source document. No analysis results or legal conclusions are displayed until an analysis is run."}
               </p>
             </div>
             <div className="min-w-24 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-right shadow-sm">
@@ -64,19 +66,31 @@ export default function WorkspaceLayout({ pdfFile = null, className = "", patent
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-2.5">
-            {METRIC_LABELS.map(([key, label]) => (
-              <div key={key} className="rounded-xl border border-slate-200/70 bg-white px-3 py-2.5">
-                <span className="block text-[11px] text-slate-500">{label}</span>
-                <span className="mt-0.5 block text-sm font-semibold tabular-nums text-slate-800">
-                  {formatMetric(screeningMetrics?.[key])}
-                </span>
-              </div>
-            ))}
-          </div>
+          {analysisAvailable ? (
+            <div className="mt-4 grid grid-cols-2 gap-2.5">
+              {METRIC_LABELS.map(([key, label]) => (
+                <div key={key} className="rounded-xl border border-slate-200/70 bg-white px-3 py-2.5">
+                  <span className="block text-[11px] text-slate-500">{label}</span>
+                  <span className="mt-0.5 block text-sm font-semibold tabular-nums text-slate-800">
+                    {formatMetric(screeningMetrics?.[key])}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white px-3 py-3 text-xs leading-5 text-slate-500">
+              Source preview only. Choose an extracted claim above and run an analysis to populate evidence metrics and the limitation matrix.
+            </p>
+          )}
         </header>
 
-        <ClaimMatrix className="flex-1" patents={patents} />
+        {analysisAvailable ? (
+          <ClaimMatrix className="flex-1" patents={patents} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center px-6 text-center">
+            <p className="max-w-sm text-sm leading-6 text-slate-500">No claim analysis is selected. Source passages and limitation assessments will appear here after an analysis is created.</p>
+          </div>
+        )}
       </section>
     </main>
   );
