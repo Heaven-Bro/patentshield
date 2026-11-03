@@ -332,16 +332,50 @@ class BM25LexicalIndex:
             return []
 
         scores = self._engine.get_scores(query_tokens)
-        ranked_indices = sorted(
-            range(len(self._chunk_ids)),
-            key=lambda index: float(scores[index]),
-            reverse=True,
-        )
+        query_terms = set(query_tokens)
+        tokenized_documents = [self._tokenize(text) for text in self._texts]
+        matched_indices = [
+            index
+            for index, document_tokens in enumerate(tokenized_documents)
+            if query_terms.intersection(document_tokens)
+        ]
+        if not matched_indices:
+            return []
+
+        # BM25Okapi's IDF can be negative when a term occurs in every document,
+        # especially in one-document or otherwise tiny corpora. In that case,
+        # discard its misleading negative ordering and rank only genuine token
+        # matches by query coverage. The ordinary positive-score BM25 path is
+        # unchanged for corpora with usable positive scores.
+        if any(float(scores[index]) <= 0 for index in matched_indices):
+            denominator = max(len(query_terms), 1)
+            ranked_indices = sorted(
+                matched_indices,
+                key=lambda index: (
+                    -len(query_terms.intersection(tokenized_documents[index])) / denominator,
+                    -sum(tokenized_documents[index].count(term) for term in query_terms),
+                    index,
+                ),
+            )
+            ranked_results = [
+                (
+                    index,
+                    len(query_terms.intersection(tokenized_documents[index])) / denominator,
+                )
+                for index in ranked_indices
+            ]
+        else:
+            ranked_results = [
+                (index, float(scores[index]))
+                for index in sorted(
+                    matched_indices,
+                    key=lambda index: float(scores[index]),
+                    reverse=True,
+                )
+            ]
+
         results: list[BM25SearchResult] = []
-        for index in ranked_indices:
-            score = float(scores[index])
-            if score <= 0:
-                continue
+        for index, score in ranked_results[:limit]:
             results.append(
                 {
                     "chunk_id": self._chunk_ids[index],

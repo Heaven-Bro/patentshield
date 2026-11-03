@@ -144,7 +144,7 @@ class PatentPublication(models.Model):
                 fields=("embedding",),
                 m=16,
                 ef_construction=64,
-                opclasses=("vector_cosine_ops",),
+                opclasses=["vector_cosine_ops"],
             ),
         ]
         ordering = ("-publication_date", "publication_number")
