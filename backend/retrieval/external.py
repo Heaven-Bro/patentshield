@@ -22,6 +22,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 import requests
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 USPTO_SEARCH_URL = "https://api.uspto.gov/api/v1/patent/applications/search"
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 HTTP_TIMEOUT_SECONDS = 10
+HTTP_TOTAL_TIMEOUT_SECONDS = 20
 MAX_QUERY_LENGTH = 1_000
 MAX_PROVIDER_RESULTS = 50
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -668,8 +670,10 @@ def _validate_provider_endpoint(endpoint: str, provider: str) -> str:
 def _read_bounded_provider_body(
     response: requests.Response,
     provider: str,
+    *,
+    deadline: float,
 ) -> bytes:
-    """Read a provider response without buffering more than the configured cap."""
+    """Read a byte-bounded provider response before its total deadline."""
     content_length = response.headers.get("Content-Length")
     if content_length is not None:
         try:
@@ -684,16 +688,46 @@ def _read_bounded_provider_body(
             )
 
     body = bytearray()
+
+    def _append_chunk(chunk: bytes) -> None:
+        if len(body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
+            raise ExternalSearchError(
+                f"{provider} response exceeded the {MAX_PROVIDER_RESPONSE_BYTES}-byte limit."
+            )
+        body.extend(chunk)
+
     try:
-        for chunk in response.iter_content(chunk_size=PROVIDER_RESPONSE_CHUNK_BYTES):
-            if not chunk:
-                continue
-            if len(body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
-                raise ExternalSearchError(
-                    f"{provider} response exceeded the {MAX_PROVIDER_RESPONSE_BYTES}-byte limit."
+        raw_reader = getattr(getattr(response, "raw", None), "read1", None)
+        if callable(raw_reader):
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ExternalSearchError(f"{provider} request timed out.")
+                chunk = raw_reader(
+                    PROVIDER_RESPONSE_CHUNK_BYTES,
+                    decode_content=True,
                 )
-            body.extend(chunk)
+                if time.monotonic() >= deadline:
+                    raise ExternalSearchError(f"{provider} request timed out.")
+                if not chunk:
+                    break
+                _append_chunk(chunk)
+        else:
+            for chunk in response.iter_content(
+                chunk_size=PROVIDER_RESPONSE_CHUNK_BYTES
+            ):
+                if time.monotonic() >= deadline:
+                    raise ExternalSearchError(f"{provider} request timed out.")
+                if chunk:
+                    _append_chunk(chunk)
+    except ExternalSearchError:
+        raise
+    except (requests.Timeout, Urllib3TimeoutError, TimeoutError) as exc:
+        raise ExternalSearchError(f"{provider} request timed out.") from exc
     except requests.RequestException as exc:
+        raise ExternalSearchError(
+            f"{provider} response body could not be read."
+        ) from exc
+    except Exception as exc:
         raise ExternalSearchError(
             f"{provider} response body could not be read."
         ) from exc
@@ -709,6 +743,7 @@ def _post_provider_json(
 ) -> Any:
     """POST to a fixed provider endpoint and parse a byte-bounded JSON response."""
     safe_endpoint = _validate_provider_endpoint(endpoint, provider)
+    deadline = time.monotonic() + HTTP_TOTAL_TIMEOUT_SECONDS
     try:
         response = requests.post(
             safe_endpoint,
@@ -724,13 +759,15 @@ def _post_provider_json(
         raise ExternalSearchError(f"{provider} request failed.") from exc
 
     try:
+        if time.monotonic() >= deadline:
+            raise ExternalSearchError(f"{provider} request timed out.")
         if 300 <= response.status_code < 400:
             # Never replay a credential-bearing request to a redirect target.
             raise ExternalSearchError(
                 f"{provider} returned an unsupported redirect; request blocked."
             )
         _raise_for_provider_response(response, provider)
-        body = _read_bounded_provider_body(response, provider)
+        body = _read_bounded_provider_body(response, provider, deadline=deadline)
         try:
             return json.loads(body)
         except (ValueError, TypeError, UnicodeDecodeError) as exc:

@@ -6,6 +6,7 @@ from django.test import SimpleTestCase
 
 from retrieval.external import (
     MAX_PROVIDER_RESPONSE_BYTES,
+    HTTP_TOTAL_TIMEOUT_SECONDS,
     ExternalSearchError,
     ImproperlyConfigured,
     TAVILY_SEARCH_URL,
@@ -36,6 +37,28 @@ class _FakeStreamingResponse:
 
     def close(self):
         self.closed = True
+
+
+class _SlowProgressRaw:
+    def __init__(self, response, clock):
+        self.response = response
+        self.clock = clock
+        self.read_count = 0
+
+    def read1(self, _chunk_size, decode_content=True):
+        self.response.iterated = True
+        self.read_count += 1
+        if self.read_count == 1:
+            self.clock[0] = HTTP_TOTAL_TIMEOUT_SECONDS / 2
+            return b'{"results":'
+        self.clock[0] = HTTP_TOTAL_TIMEOUT_SECONDS + 1
+        return b' []}'
+
+
+class _SlowProgressResponse(_FakeStreamingResponse):
+    def __init__(self, clock):
+        super().__init__()
+        self.raw = _SlowProgressRaw(self, clock)
 
 
 class ExternalProviderTransportSecurityTests(SimpleTestCase):
@@ -113,3 +136,17 @@ class ExternalProviderTransportSecurityTests(SimpleTestCase):
         self.assertEqual(payload, {"results": []})
         self.assertTrue(response.closed)
 
+    def test_slow_continuously_progressing_body_hits_total_deadline(self):
+        clock = [0.0]
+        response = _SlowProgressResponse(clock)
+        with patch("retrieval.external.time.monotonic", side_effect=lambda: clock[0]):
+            with patch("retrieval.external.requests.post", return_value=response):
+                with self.assertRaisesRegex(ExternalSearchError, "request timed out"):
+                    _post_provider_json(
+                        "TAVILY",
+                        TAVILY_SEARCH_URL,
+                        headers={},
+                        json_body={},
+                    )
+        self.assertTrue(response.iterated)
+        self.assertTrue(response.closed)
