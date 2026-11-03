@@ -9,6 +9,7 @@ from datetime import timedelta
 
 from celery import Task, shared_task
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from audit.models import AuditLog
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 MAX_PDF_PAGES = 2_000
 MAX_EXTRACTED_CHARACTERS = 25_000_000
 PROCESSING_LEASE = timedelta(minutes=45)
+EXTRACTION_QUEUE_GRACE_PERIOD = timedelta(minutes=15)
+EXTRACTION_RECOVERY_BATCH_SIZE = 100
 
 
 def _bounded_join_pages(pages, page_count: int) -> tuple[str, int]:
@@ -126,6 +129,7 @@ def _record_extraction_failure(
         ).update(
             extraction_status=status_value,
             extraction_started_at=None,
+            extraction_queued_at=None,
             extraction_error_code=error_code,
         )
         Patent.objects.filter(
@@ -199,10 +203,11 @@ def process_patent_document_version(
             if not already_extracted:
                 document_version.extraction_status = PatentDocumentVersion.ExtractionStatus.EXTRACTING
                 document_version.extraction_started_at = timezone.now()
+                document_version.extraction_queued_at = None
                 document_version.text_indexing_task_id = ""
                 document_version.schematic_indexing_task_id = ""
                 document_version.save(update_fields=(
-                    "extraction_status", "extraction_started_at",
+                    "extraction_status", "extraction_started_at", "extraction_queued_at",
                     "text_indexing_task_id", "schematic_indexing_task_id",
                 ))
                 Patent.objects.filter(
@@ -250,7 +255,6 @@ def process_patent_document_version(
                 patent_id=document_version.patent_id,
                 document_version_id=document_version.pk,
             ).delete()
-            Claim.objects.filter(document_version=document_version).delete()
             Claim.objects.bulk_create(claim_records, batch_size=200, ignore_conflicts=True)
             PatentDocumentVersion.objects.filter(
                 pk=document_version.pk,
@@ -258,6 +262,7 @@ def process_patent_document_version(
             ).update(
                 extraction_status=PatentDocumentVersion.ExtractionStatus.EXTRACTED,
                 extraction_started_at=None,
+                extraction_queued_at=None,
                 page_count=extracted.page_count,
                 text_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
                 schematic_indexing_status=PatentDocumentVersion.StageStatus.PENDING,
@@ -349,6 +354,7 @@ def process_patent_document_version(
             ).update(
                 extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
                 extraction_started_at=None,
+                extraction_queued_at=timezone.now(),
             )
             try:
                 AuditLog.objects.create(
@@ -368,3 +374,144 @@ def process_patent_document_version(
             except Exception:
                 logger.exception("Could not persist extraction retry audit for %s.", document_version.pk)
         raise self.retry(exc=exc, countdown=_retry_countdown(self.request.retries))
+
+
+def _extraction_recovery_due(
+    document_version: PatentDocumentVersion,
+    *,
+    now,
+) -> bool:
+    """Return whether a pending dispatch or extraction lease is stale."""
+    queue_cutoff = now - EXTRACTION_QUEUE_GRACE_PERIOD
+    if document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.PENDING:
+        queued_at = document_version.extraction_queued_at or document_version.created_at
+        return queued_at <= queue_cutoff
+    if document_version.extraction_status == PatentDocumentVersion.ExtractionStatus.EXTRACTING:
+        if document_version.extraction_started_at:
+            return document_version.extraction_started_at <= now - PROCESSING_LEASE
+        queued_at = document_version.extraction_queued_at or document_version.created_at
+        return queued_at <= queue_cutoff
+    return False
+
+
+@shared_task(acks_late=True)
+def recover_stale_document_extractions(
+    batch_size: int = EXTRACTION_RECOVERY_BATCH_SIZE,
+) -> dict[str, int]:
+    """Requeue bounded stale extraction reservations without crossing tenants."""
+    try:
+        limit = max(1, min(int(batch_size), EXTRACTION_RECOVERY_BATCH_SIZE))
+    except (TypeError, ValueError):
+        limit = EXTRACTION_RECOVERY_BATCH_SIZE
+    now = timezone.now()
+    queue_cutoff = now - EXTRACTION_QUEUE_GRACE_PERIOD
+    processing_cutoff = now - PROCESSING_LEASE
+    stale_pending = (
+        Q(extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING)
+        & (
+            Q(extraction_queued_at__lte=queue_cutoff)
+            | Q(extraction_queued_at__isnull=True, created_at__lte=queue_cutoff)
+        )
+    )
+    stale_extracting = (
+        Q(extraction_status=PatentDocumentVersion.ExtractionStatus.EXTRACTING)
+        & (
+            Q(extraction_started_at__lte=processing_cutoff)
+            | Q(
+                extraction_started_at__isnull=True,
+                extraction_queued_at__lte=queue_cutoff,
+            )
+            | Q(
+                extraction_started_at__isnull=True,
+                extraction_queued_at__isnull=True,
+                created_at__lte=queue_cutoff,
+            )
+        )
+    )
+    candidates = list(
+        PatentDocumentVersion.objects.filter(stale_pending | stale_extracting)
+        .order_by("created_at")
+        .values_list("pk", "tenant_id", "patent_id")[:limit]
+    )
+
+    requeued = 0
+    queue_failures = 0
+    skipped = 0
+    for version_id, tenant_id, patent_id in candidates:
+        with transaction.atomic():
+            try:
+                version = (
+                    PatentDocumentVersion.objects.select_for_update()
+                    .get(pk=version_id, tenant_id=tenant_id, patent_id=patent_id)
+                )
+            except PatentDocumentVersion.DoesNotExist:
+                skipped += 1
+                continue
+            if not _extraction_recovery_due(version, now=now):
+                skipped += 1
+                continue
+            version.extraction_status = PatentDocumentVersion.ExtractionStatus.PENDING
+            version.extraction_started_at = None
+            version.extraction_queued_at = now
+            version.extraction_error_code = ""
+            version.save(update_fields=(
+                "extraction_status", "extraction_started_at",
+                "extraction_queued_at", "extraction_error_code",
+            ))
+
+        try:
+            process_patent_document_version.apply_async(
+                args=[str(version_id)],
+                queue="ingestion",
+            )
+            requeued += 1
+        except Exception as exc:
+            logger.error(
+                "Could not recover queued patent document version %s (error_type=%s).",
+                version_id,
+                type(exc).__name__,
+            )
+            with transaction.atomic():
+                changed = PatentDocumentVersion.objects.filter(
+                    pk=version_id,
+                    tenant_id=tenant_id,
+                    patent_id=patent_id,
+                    extraction_status=PatentDocumentVersion.ExtractionStatus.PENDING,
+                    extraction_queued_at=now,
+                ).update(
+                    extraction_status=PatentDocumentVersion.ExtractionStatus.FAILED,
+                    extraction_queued_at=None,
+                    extraction_error_code="QUEUE_FAILED",
+                )
+                if changed:
+                    Patent.objects.filter(pk=patent_id, tenant_id=tenant_id).update(
+                        status=Patent.Status.FAILED
+                    )
+                    try:
+                        with transaction.atomic():
+                            AuditLog.objects.create(
+                                tenant_id=tenant_id,
+                                actor_user_id=None,
+                                action="RECOVER_PATENT_DOCUMENT_PROCESSING",
+                                resource_type="PatentDocumentVersion",
+                                resource_id=version_id,
+                                request_id=None,
+                                outcome=AuditLog.Outcome.FAILURE,
+                                metadata={
+                                    "error_type": type(exc).__name__[:64],
+                                    "recovery": True,
+                                },
+                            )
+                    except Exception:
+                        logger.error("Could not record extraction recovery failure.")
+                    queue_failures += 1
+                else:
+                    skipped += 1
+
+    if requeued or queue_failures:
+        logger.info(
+            "Document extraction recovery completed: %s requeued, %s queue failures.",
+            requeued,
+            queue_failures,
+        )
+    return {"requeued": requeued, "queue_failures": queue_failures, "skipped": skipped}
