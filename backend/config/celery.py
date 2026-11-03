@@ -59,6 +59,11 @@ app.conf.update(
             "schedule": 60.0,
             "options": {"queue": "external_search"},
         },
+        "recover-stale-document-extractions": {
+            "task": "ingestion.tasks.recover_stale_document_extractions",
+            "schedule": 300.0,
+            "options": {"queue": "ingestion"},
+        },
     },
 )
 

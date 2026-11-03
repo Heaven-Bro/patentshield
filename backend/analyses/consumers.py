@@ -193,4 +193,12 @@ class AnalysisProgressConsumer(AsyncJsonWebsocketConsumer):
             required="READ",
         ):
             return None
+        if not matter_access_allowed(
+            tenant=membership.tenant,
+            user=membership.user,
+            matter_type="patent",
+            matter_id=report.patent_id,
+            required="READ",
+        ):
+            return None
         return str(report.tenant_id)
