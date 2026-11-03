@@ -223,6 +223,7 @@ export async function downloadArtifact(path, options = {}) {
       "application/json",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/csv",
     ].join(", "),
   };
   if (options.tenantId) headers["X-Tenant-ID"] = options.tenantId;

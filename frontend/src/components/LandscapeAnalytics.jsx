@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiError, apiRequest, requireResultsArray } from "../lib/apiClient";
+import { ApiError, apiRequest, downloadArtifact, requireResultsArray } from "../lib/apiClient";
 
 const API_ROOT = "/api/v1/landscapes";
 function safeHttpsUrl(value) {
@@ -303,6 +303,16 @@ export default function LandscapeAnalytics({ tenant }) {
     });
   }
 
+  async function exportStudyCsv() {
+    if (!selectedStudyId) return;
+    await runBusy("export-study", async () => {
+      await downloadArtifact(`${API_ROOT}/studies/${selectedStudyId}/export/`, {
+        tenantId: tenant.id,
+        fallbackFilename: `patentshield-landscape-${selectedStudyId}.csv`,
+      });
+    }, "Landscape source snapshot CSV downloaded.");
+  }
+
   async function addAssigneeAlias(event) {
     event.preventDefault();
     if (!selectedAssigneeId || !aliasName.trim()) return;
@@ -385,12 +395,13 @@ export default function LandscapeAnalytics({ tenant }) {
             <div><h2 className="text-sm font-bold tracking-tight text-slate-950">Study workspace</h2><p className="mt-1 text-xs text-slate-500">Select one tenant-owned study to review its snapshot and analytics.</p></div>
             <span className={`rounded-full px-2.5 py-1.5 text-[11px] font-semibold ${study?.status === "READY" ? "bg-emerald-100 text-emerald-800" : study?.status === "FAILED" ? "bg-rose-100 text-rose-800" : study?.status === "BUILDING" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>{study?.status || (loading ? "Loading" : "No study")}</span>
           </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
             <select className={inputClass} value={selectedStudyId} onChange={(event) => { setStudy(null); setAnalytics(null); setStudyPublications([]); setAnnotations([]); setError(""); setSelectedStudyId(event.target.value); }} aria-label="Selected landscape study">
               <option value="">Select a study…</option>
               {studies.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
             </select>
             <button className={primaryButton} type="button" disabled={!study || !studyPublications.length || ["BUILDING", "ARCHIVED"].includes(study.status) || busyKey === "build"} onClick={() => void buildLandscape()}>{busyKey === "build" ? "Queueing…" : study?.status === "READY" ? "Rebuild analysis" : "Build landscape"}</button>
+            <button className={secondaryButton} type="button" disabled={!study || !studyPublications.length || busyKey === "export-study"} onClick={() => void exportStudyCsv()}>{busyKey === "export-study" ? "Exporting…" : "Export CSV"}</button>
           </div>
           {study && <div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Pinned publications</p><p className="mt-1 text-lg font-semibold text-slate-900">{countLabel(study.publication_count)}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Clusters</p><p className="mt-1 text-lg font-semibold text-slate-900">{countLabel(study.cluster_count)}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Last build</p><p className="mt-1 text-sm font-semibold text-slate-900">{dateLabel(study.completed_at)}</p></div></div>}
           {study?.error_code && <p className="mt-3 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-800">Build state: {study.error_code.replaceAll("_", " ")}. Inspect worker logs and retry after correcting the deployment issue.</p>}

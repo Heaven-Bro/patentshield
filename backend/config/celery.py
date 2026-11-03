@@ -35,6 +35,8 @@ app.conf.update(
         "fto.tasks.generate_fto_candidate_matches": {"queue": "analysis"},
         "fto.tasks.recover_stale_fto_candidate_matches": {"queue": "analysis"},
         "fto.tasks.*": {"queue": "ingestion"},
+        # Recovery must run independently of the embedding worker it repairs.
+        "landscapes.tasks.recover_stale_landscape_builds": {"queue": "analysis"},
         "landscapes.tasks.*": {"queue": "embedding"},
     },
     task_default_queue="ingestion",
@@ -73,6 +75,11 @@ app.conf.update(
         },
         "recover-stale-fto-candidate-matches": {
             "task": "fto.tasks.recover_stale_fto_candidate_matches",
+            "schedule": 300.0,
+            "options": {"queue": "analysis"},
+        },
+        "recover-stale-landscape-builds": {
+            "task": "landscapes.tasks.recover_stale_landscape_builds",
             "schedule": 300.0,
             "options": {"queue": "analysis"},
         },

@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
+from datetime import timedelta
 
 from celery import shared_task
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from indexing.services import BGEEmbedder
@@ -63,12 +66,18 @@ def build_landscape(self, study_id: str, tenant_id: str, force: bool = False) ->
         .order_by("publication_id", "pk")
     )
     if not rows:
-        LandscapeStudy.objects.filter(pk=study_id, tenant_id=tenant_id).update(
-            status=LandscapeStudy.Status.FAILED,
-            error_code="NO_PUBLICATIONS_SELECTED",
-            completed_at=timezone.now(),
-            updated_at=timezone.now(),
-        )
+        now = timezone.now()
+        with transaction.atomic():
+            locked_study = LandscapeStudy.objects.select_for_update().filter(
+                pk=study_id, tenant_id=tenant_id, status=LandscapeStudy.Status.BUILDING,
+                built_by_task_id=str(getattr(self.request, "id", "") or "")[:100],
+            ).first()
+            if locked_study is None:
+                return {"study_id": study_id, "status": "STALE_TASK_IGNORED"}
+            locked_study.status = LandscapeStudy.Status.FAILED
+            locked_study.error_code = "NO_PUBLICATIONS_SELECTED"
+            locked_study.completed_at = now
+            locked_study.save(update_fields=("status", "error_code", "completed_at", "updated_at"))
         return {"study_id": study_id, "status": "FAILED", "error_code": "NO_PUBLICATIONS_SELECTED"}
 
     try:
@@ -209,9 +218,99 @@ def build_landscape(self, study_id: str, tenant_id: str, force: bool = False) ->
         if getattr(self.request, "retries", 0) < self.max_retries:
             # Keep the state BUILDING for the retry; retry is bounded.
             raise self.retry(exc=exc, countdown=45 * (getattr(self.request, "retries", 0) + 1))
-        LandscapeStudy.objects.filter(pk=study_id, tenant_id=tenant_id).update(
-            status=LandscapeStudy.Status.FAILED,
-            error_code="LANDSCAPE_BUILD_FAILED",
-            completed_at=timezone.now(),
-        )
+        now = timezone.now()
+        with transaction.atomic():
+            locked_study = LandscapeStudy.objects.select_for_update().filter(
+                pk=study_id, tenant_id=tenant_id, status=LandscapeStudy.Status.BUILDING,
+                built_by_task_id=str(getattr(self.request, "id", "") or "")[:100],
+            ).first()
+            if locked_study is None:
+                return {"study_id": study_id, "status": "STALE_TASK_IGNORED"}
+            locked_study.status = LandscapeStudy.Status.FAILED
+            locked_study.error_code = "LANDSCAPE_BUILD_FAILED"
+            locked_study.completed_at = now
+            locked_study.save(update_fields=("status", "error_code", "completed_at", "updated_at"))
         return {"study_id": str(study_id), "status": "FAILED", "error_code": "LANDSCAPE_BUILD_FAILED"}
+
+
+
+def _mark_recovery_dispatch_failed(study_id: str, tenant_id: str, task_id: str) -> None:
+    """Fail only the reservation created by this recovery attempt."""
+    now = timezone.now()
+    with transaction.atomic():
+        study = LandscapeStudy.objects.select_for_update().filter(
+            pk=study_id, tenant_id=tenant_id, status=LandscapeStudy.Status.BUILDING,
+            built_by_task_id=task_id,
+        ).first()
+        if study is None:
+            return
+        study.status = LandscapeStudy.Status.FAILED
+        study.error_code = "RECOVERY_QUEUE_FAILED"
+        study.completed_at = now
+        study.save(update_fields=("status", "error_code", "completed_at", "updated_at"))
+
+
+def _dispatch_recovered_landscape(study_id: str, tenant_id: str, task_id: str) -> None:
+    """Dispatch after the reservation commit; fence failure cleanup by task ID."""
+    try:
+        build_landscape.apply_async(
+            args=[study_id, tenant_id],
+            kwargs={"force": False},
+            task_id=task_id,
+            queue="embedding",
+        )
+    except Exception as exc:  # pragma: no cover - exercised in deployment integration tests
+        logger.warning(
+            "Stale landscape recovery dispatch failed (study_id=%s, error_type=%s).",
+            study_id, type(exc).__name__,
+        )
+        _mark_recovery_dispatch_failed(study_id, tenant_id, task_id)
+
+
+@shared_task(bind=True, acks_late=True, max_retries=1, default_retry_delay=60)
+def recover_stale_landscape_builds(
+    self, stale_after_minutes: int = 45, batch_size: int = 100
+) -> dict[str, int]:
+    """Requeue lost/abandoned landscape builds with durable task-ID fencing.
+
+    The threshold is greater than the configured 30-minute Celery hard limit.
+    A new task ID is persisted before dispatch, and cleanup on broker failure
+    can only change the matching reservation.
+    """
+    stale_after_minutes = max(45, min(int(stale_after_minutes), 24 * 60))
+    batch_size = max(1, min(int(batch_size), 250))
+    now = timezone.now()
+    cutoff = now - timedelta(minutes=stale_after_minutes)
+    candidates = list(
+        LandscapeStudy.objects.filter(
+            status=LandscapeStudy.Status.BUILDING,
+        ).filter(Q(started_at__isnull=True) | Q(started_at__lt=cutoff))
+        .order_by("started_at", "pk")
+        .values_list("pk", "tenant_id")[:batch_size]
+    )
+
+    reserved = 0
+    for raw_study_id, raw_tenant_id in candidates:
+        study_id = str(raw_study_id)
+        tenant_id = str(raw_tenant_id)
+        new_task_id = str(uuid.uuid4())
+        should_dispatch = False
+        with transaction.atomic():
+            study = LandscapeStudy.objects.select_for_update(skip_locked=True).filter(
+                pk=raw_study_id, tenant_id=raw_tenant_id, status=LandscapeStudy.Status.BUILDING,
+            ).filter(Q(started_at__isnull=True) | Q(started_at__lt=cutoff)).first()
+            if study is None:
+                continue
+            study.built_by_task_id = new_task_id
+            study.started_at = now
+            study.error_code = ""
+            study.completed_at = None
+            study.save(update_fields=("built_by_task_id", "started_at", "error_code", "completed_at", "updated_at"))
+            transaction.on_commit(
+                lambda sid=study_id, tid=tenant_id, task_id=new_task_id: _dispatch_recovered_landscape(sid, tid, task_id)
+            )
+            should_dispatch = True
+        if should_dispatch:
+            reserved += 1
+
+    return {"scanned": len(candidates), "reserved": reserved, "stale_after_minutes": stale_after_minutes}

@@ -1,11 +1,14 @@
 """Tenant-authorized REST endpoints for landscape studies and analytics."""
 from __future__ import annotations
 
+import csv
+import io
 from collections import Counter
 from datetime import date
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import NotFound, ValidationError
@@ -106,6 +109,38 @@ def _study_payload(study: LandscapeStudy) -> dict:
         "created_at": study.created_at,
         "updated_at": study.updated_at,
     }
+
+
+def _csv_safe_cell(value) -> str:
+    """Serialize a cell and neutralize spreadsheet formula injection.
+
+    CSV exports are commonly opened in spreadsheet software. Prefixing an
+    apostrophe for formula-leading values prevents untrusted patent metadata
+    from being interpreted as a formula by common spreadsheet applications.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        value = "; ".join(str(item) for item in value)
+    text = str(value)
+    probe = text.lstrip(" \t\r\n")
+    if probe.startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return "'" + text
+    return text
+
+
+class _CsvBuffer:
+    """Minimal reusable text buffer for streaming CSV rows."""
+
+    def __init__(self):
+        self.buffer = io.StringIO()
+
+    def write(self, writer, values):
+        writer.writerow([_csv_safe_cell(value) for value in values])
+        output = self.buffer.getvalue()
+        self.buffer.seek(0)
+        self.buffer.truncate(0)
+        return output
 
 
 def _publication_payload(publication: PatentPublication) -> dict:
@@ -371,6 +406,56 @@ class LandscapeAnalyticsView(LandscapeAPIView):
             "clusters": [{"id": str(cluster.pk), "cluster_number": cluster.cluster_number, "label": cluster.label, "explanation": cluster.explanation, "top_terms": cluster.top_terms, "top_classification_codes": cluster.top_classification_codes, "publication_count": cluster.publication_count, "algorithm": cluster.algorithm} for cluster in cluster_rows],
             "points": points,
         })
+
+
+class LandscapeStudyExportView(LandscapeAPIView):
+    """Stream the immutable study bibliography as a formula-safe CSV file."""
+
+    def get(self, request: Request, study_id: str) -> StreamingHttpResponse:
+        study = self.get_study(request, study_id)
+        require_matter_access(
+            request=request, matter_type="landscape_study", matter_id=study.pk, required="READ"
+        )
+        queryset = (
+            LandscapeStudyPublication.objects.filter(tenant_id=study.tenant_id, study=study)
+            .select_related("cluster")
+            .order_by("publication_number", "pk")
+        )
+        headers = (
+            "publication_number", "application_number", "jurisdiction", "title", "abstract",
+            "filing_date", "publication_date", "grant_date", "legal_status",
+            "applicant_names", "normalized_assignee_names", "ipc_codes", "cpc_codes",
+            "family_system", "family_identifier", "source_url", "source_payload_hash",
+            "snapshot_sha256", "cluster_number", "cluster_label",
+            "projection_x", "projection_y", "projection_method",
+        )
+
+        def rows():
+            buffer = _CsvBuffer()
+            writer = csv.writer(buffer.buffer, lineterminator="\r\n")
+            yield buffer.write(writer, headers)
+            for row in queryset.iterator(chunk_size=250):
+                yield buffer.write(writer, (
+                    row.publication_number, row.application_number, row.jurisdiction, row.title,
+                    row.abstract, row.filing_date, row.publication_date, row.grant_date,
+                    row.legal_status, row.applicant_names, row.normalized_assignee_names,
+                    row.ipc_codes, row.cpc_codes, row.family_system, row.family_identifier,
+                    row.source_url, row.source_payload_hash, row.snapshot_sha256,
+                    row.cluster.cluster_number if row.cluster_id else "",
+                    row.cluster.label if row.cluster_id else "", row.projection_x,
+                    row.projection_y, row.projection_method,
+                ))
+
+        response = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="patentshield-landscape-{study.pk}.csv"'
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        audit_landscape_event(
+            tenant_id=study.tenant_id, actor_id=request.user.pk,
+            action="LANDSCAPE_STUDY_EXPORTED", resource_type="LandscapeStudy",
+            resource_id=study.pk, metadata={"format": "csv", "publication_count": queryset.count()},
+        )
+        return response
 
 
 class AssigneeListCreateView(LandscapeAPIView):

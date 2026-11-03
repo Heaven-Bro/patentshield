@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import math
+from datetime import timedelta
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from landscapes.models import LandscapeStudy
+from landscapes.views import _csv_safe_cell
+from landscapes.tasks import _mark_recovery_dispatch_failed, recover_stale_landscape_builds
 from landscapes.services import (
     create_study_publication_snapshot,
     deterministic_kmeans,
@@ -32,6 +38,18 @@ class NormalizationTests(SimpleTestCase):
         self.assertEqual(taxonomy_code("g06f 16/00"), "G06F16/00")
         self.assertEqual(taxonomy_prefix("G06F16/00"), "G06")
         self.assertEqual(taxonomy_prefix("H04W 4/80"), "H04")
+
+
+class ExportSafetyTests(SimpleTestCase):
+    def test_csv_cells_neutralize_formula_leading_values(self):
+        for payload in ("=HYPERLINK(\"https://evil.example\")", "+1+1", "-2+3", "@SUM(1,2)", "\t=cmd|'/C calc'!A0"):
+            with self.subTest(payload=payload):
+                self.assertTrue(_csv_safe_cell(payload).startswith("'"))
+
+    def test_csv_cells_preserve_ordinary_values(self):
+        self.assertEqual(_csv_safe_cell("US1234567A1"), "US1234567A1")
+        self.assertEqual(_csv_safe_cell(["H04W", "G06F"]), "H04W; G06F")
+        self.assertEqual(_csv_safe_cell(None), "")
 
 
 class ClusteringTests(SimpleTestCase):
@@ -140,3 +158,75 @@ class LandscapeTenantIsolationTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], LandscapeStudy.Status.READY)
+
+    def test_study_csv_export_is_tenant_scoped_and_contains_pinned_source(self):
+        publication = PatentPublication.objects.create(
+            provider=PatentPublication.Provider.USPTO,
+            provider_record_id="landscape-export-001",
+            jurisdiction="US",
+            publication_number="US7654321A1",
+            title="=Untrusted spreadsheet title",
+            abstract="Pinned snapshot abstract",
+            applicant_names=["Example Inc."],
+            cpc_codes=["H04W4/80"],
+        )
+        create_study_publication_snapshot(self.study_a, publication)
+        response = self.client.get(
+            f"/api/v1/landscapes/studies/{self.study_a.pk}/export/",
+            HTTP_X_TENANT_ID=str(self.tenant_a.pk),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response["Content-Type"])
+        self.assertIn("private, no-store", response["Cache-Control"])
+        payload = b"".join(response.streaming_content).decode("utf-8")
+        self.assertIn("US7654321A1", payload)
+        self.assertIn("'=Untrusted spreadsheet title", payload)
+
+    def test_study_csv_export_does_not_cross_tenant_boundary(self):
+        response = self.client.get(
+            f"/api/v1/landscapes/studies/{self.study_b.pk}/export/",
+            HTTP_X_TENANT_ID=str(self.tenant_a.pk),
+        )
+        self.assertEqual(response.status_code, 404)
+    def test_stale_build_recovery_reserves_once_and_dispatches_after_commit(self):
+        study = self.study_a
+        study.status = LandscapeStudy.Status.BUILDING
+        study.started_at = timezone.now() - timedelta(hours=2)
+        study.built_by_task_id = "lost-task"
+        study.save(update_fields=("status", "started_at", "built_by_task_id", "updated_at"))
+
+        with patch("landscapes.tasks.build_landscape.apply_async") as dispatch:
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                result = recover_stale_landscape_builds.run(stale_after_minutes=45, batch_size=100)
+
+            self.assertEqual(result["reserved"], 1)
+            self.assertEqual(len(callbacks), 1)
+            dispatch.assert_called_once()
+            call_kwargs = dispatch.call_args.kwargs
+            self.assertEqual(call_kwargs["queue"], "embedding")
+            self.assertNotEqual(call_kwargs["task_id"], "lost-task")
+
+            study.refresh_from_db()
+            self.assertEqual(study.status, LandscapeStudy.Status.BUILDING)
+            self.assertEqual(study.built_by_task_id, call_kwargs["task_id"])
+
+            with self.captureOnCommitCallbacks(execute=True) as second_callbacks:
+                second = recover_stale_landscape_builds.run(stale_after_minutes=45, batch_size=100)
+            self.assertEqual(second["reserved"], 0)
+            self.assertEqual(len(second_callbacks), 0)
+            dispatch.assert_called_once()
+
+    def test_recovery_dispatch_failure_is_fenced_by_reserved_task_id(self):
+        study = self.study_a
+        study.status = LandscapeStudy.Status.BUILDING
+        study.built_by_task_id = "new-current-task"
+        study.save(update_fields=("status", "built_by_task_id", "updated_at"))
+
+        _mark_recovery_dispatch_failed(str(study.pk), str(study.tenant_id), "old-stale-task")
+        study.refresh_from_db()
+        self.assertEqual(study.status, LandscapeStudy.Status.BUILDING)
+
+        _mark_recovery_dispatch_failed(str(study.pk), str(study.tenant_id), "new-current-task")
+        study.refresh_from_db()
+        self.assertEqual(study.status, LandscapeStudy.Status.FAILED)
+        self.assertEqual(study.error_code, "RECOVERY_QUEUE_FAILED")
