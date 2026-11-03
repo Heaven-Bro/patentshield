@@ -9,6 +9,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from analyses.models import AnalysisReport
+from enterprise_identity.models import MatterGrant, MatterPolicy
 from analyses.tasks import (
     _claim_analysis_for_execution,
     _mark_analysis_failed,
@@ -16,7 +17,7 @@ from analyses.tasks import (
 )
 from audit.models import AuditLog
 from patents.models import Claim, Patent, PatentDocumentVersion
-from tenants.models import Tenant
+from tenants.models import Tenant, TenantMembership
 
 
 class AnalysisRetryFailureContractTests(TestCase):
@@ -32,6 +33,12 @@ class AnalysisRetryFailureContractTests(TestCase):
             name="Phase 6 Retry Tenant",
             slug="phase6-retry-tenant",
             status=Tenant.Status.ACTIVE,
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=self.user,
+            role=TenantMembership.Role.READ_ONLY,
+            status=TenantMembership.Status.ACTIVE,
         )
         self.patent = Patent.objects.create(
             tenant=self.tenant,
@@ -64,6 +71,25 @@ class AnalysisRetryFailureContractTests(TestCase):
             started_at=timezone.now(),
             execution_task_id="phase6-task-id",
         )
+        for matter_type, matter_id in (
+            ("patent", self.patent.pk),
+            ("analysis", self.report.pk),
+        ):
+            MatterPolicy.objects.create(
+                tenant=self.tenant,
+                matter_type=matter_type,
+                matter_id=matter_id,
+                enforce_acl=True,
+                created_by=self.user,
+            )
+            MatterGrant.objects.create(
+                tenant=self.tenant,
+                matter_type=matter_type,
+                matter_id=matter_id,
+                subject_user=self.user,
+                level=MatterGrant.Level.READ,
+                created_by=self.user,
+            )
 
     @staticmethod
     def _task(task_id: str, retries: int = 0, redelivered: bool = False):

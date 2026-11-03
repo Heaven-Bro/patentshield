@@ -28,6 +28,20 @@ class ReleaseArchivePolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIsNotNone(reason_for_member(name))
 
+    def test_common_credential_files_and_private_keys_are_rejected(self):
+        for name in (
+            "repo/.aws/credentials", "repo/.npmrc", "repo/.pypirc",
+            "repo/.pgpass", "repo/.git-credentials", "repo/credentials.json",
+            "repo/secrets.yaml", "repo/service-account.json", "repo/kubeconfig",
+            "repo/id_ed25519", "repo/id_rsa.prod", "repo/tls/private.key",
+            "repo/certs/signing.pem", "repo/keystore.p12", "repo/client.jks",
+            "repo/secret-prod.json", "repo/credentials-prod.toml",
+            "test_quantum_patent.pdf",
+            "repo/SECURITY_FIXES.diff", "repo/local_changes.patch",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNotNone(reason_for_member(name))
+
     def test_traversal_and_absolute_paths_rejected(self):
         self.assertIsNotNone(reason_for_member("../escape.txt"))
         self.assertIsNotNone(reason_for_member("/absolute/path"))

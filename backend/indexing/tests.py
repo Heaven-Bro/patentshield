@@ -36,6 +36,30 @@ class CJKLanguageDetectionTests(SimpleTestCase):
         document_tokens = BM25LexicalIndex._tokenize("一种用于无线通信的电路")
         self.assertTrue(set(query_tokens).intersection(document_tokens))
 
+    def test_bm25_returns_matching_document_when_single_corpus_scores_are_negative(self):
+        index = BM25LexicalIndex(
+            chunk_ids=["matching"],
+            texts=["A wireless sensor transmits measurements to a processor."],
+        )
+
+        results = index.search("wireless sensor measurements processor")
+
+        self.assertEqual([result["chunk_id"] for result in results], ["matching"])
+        self.assertGreater(results[0]["score"], 0)
+
+    def test_bm25_small_corpus_fallback_excludes_documents_without_query_terms(self):
+        index = BM25LexicalIndex(
+            chunk_ids=["matching", "unrelated"],
+            texts=[
+                "A wireless sensor transmits measurements to a processor.",
+                "A ceramic glaze is fired in a kiln.",
+            ],
+        )
+
+        results = index.search("wireless sensor measurements processor")
+
+        self.assertEqual([result["chunk_id"] for result in results], ["matching"])
+
     def test_cjk_chunker_bounds_text_without_spaces_and_preserves_offsets(self):
         source = "无线通信系统" * 120
         chunks = HybridChunker.chunk_text(source, max_tokens=100, overlap=20)

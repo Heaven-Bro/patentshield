@@ -318,6 +318,7 @@ def test_pdf_ingestion_throughput_sla(
 ) -> None:
     """Extract and index a 12-page PDF under time and Python-memory budgets."""
     from ingestion import tasks as ingestion_tasks
+    from indexing import pdf_extraction
     from indexing import tasks as indexing_tasks
 
     pdf_bytes = _build_multi_page_pdf(page_count=12)
@@ -366,25 +367,21 @@ def test_pdf_ingestion_throughput_sla(
             self.files.pop(name, None)
 
     storage = InMemoryPatentStorage()
-    monkeypatch.setattr(ingestion_tasks, "default_storage", storage)
+    monkeypatch.setattr(pdf_extraction, "default_storage", storage)
     monkeypatch.setattr(indexing_tasks, "default_storage", storage)
     monkeypatch.setattr(
         indexing_tasks.BGEEmbedder,
         "embed_texts",
         classmethod(_fake_embedding_model),
     )
-    # The extraction task normally enqueues both downstream jobs. Suppress the
-    # broker dispatch here, then execute each stage exactly once in-process so
-    # the benchmark remains deterministic and cannot race a live worker.
+    # The extraction task reserves each stage before broker dispatch. Suppress
+    # that scheduler seam here, then execute stages exactly once in-process;
+    # mocking only apply_async would leave stale reservations and make the
+    # downstream task correctly report itself as skipped.
     monkeypatch.setattr(
-        indexing_tasks.generate_document_embeddings,
-        "apply_async",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        indexing_tasks.extract_and_index_schematics,
-        "apply_async",
-        lambda *args, **kwargs: None,
+        ingestion_tasks,
+        "_dispatch_pending_index_stages",
+        lambda *_args: 0,
     )
 
     sla_seconds = _env_positive_float("PATENTSHIELD_PDF_INGESTION_SLA_SECONDS", 10.0)

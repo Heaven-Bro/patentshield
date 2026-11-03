@@ -303,6 +303,7 @@ def test_vector_search_tenant_isolation(
     user_a = tenant_pair["user_a"]
     user_b = tenant_pair["user_b"]
     vector = [1.0] + [0.0] * (BGEEmbedder.DIMENSIONS - 1)
+    embedding_model, embedding_revision = BGEEmbedder.model_identity()
     shared_text = "A wireless sensor communicates measurements to a processor."
 
     patent_a, version_a = _create_patent_version(
@@ -328,6 +329,8 @@ def test_vector_search_tenant_isolation(
             char_start=0,
             char_end=len(shared_text),
             embedding=vector,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
         )
 
     monkeypatch.setattr(
@@ -365,6 +368,7 @@ def test_hybrid_retrieval_tenant_isolation(
     user_a = tenant_pair["user_a"]
     user_b = tenant_pair["user_b"]
     vector = [1.0] + [0.0] * (BGEEmbedder.DIMENSIONS - 1)
+    embedding_model, embedding_revision = BGEEmbedder.model_identity()
     shared_text = (
         "A wireless sensor transmits measurements to a processor over a bus."
     )
@@ -392,6 +396,8 @@ def test_hybrid_retrieval_tenant_isolation(
             char_start=0,
             char_end=len(shared_text),
             embedding=vector,
+            embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
         )
 
     monkeypatch.setattr(

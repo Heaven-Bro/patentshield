@@ -25,10 +25,21 @@ FORBIDDEN_COMPONENTS = {
     "staticfiles",
     "ml_model_cache",
 }
-FORBIDDEN_SUFFIXES = {".pyc", ".pyo", ".pyd", ".sqlite3", ".sqlite3-journal"}
+FORBIDDEN_SUFFIXES = {
+    ".pyc", ".pyo", ".pyd", ".sqlite3", ".sqlite3-journal",
+    ".pem", ".p12", ".pfx", ".key", ".jks", ".keystore",
+    ".diff", ".patch",
+}
 PRIVATE_KEY_NAMES = {
     "id_rsa", "id_ed25519", "id_ecdsa", "private.key", "private_key.pem",
 }
+SENSITIVE_FILE_NAMES = {
+    ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials",
+    "credentials", "credentials.json", "credentials.yml", "credentials.yaml",
+    "credentials.toml", "secrets.json", "secrets.yml", "secrets.yaml",
+    "secrets.toml", "service-account.json", "kubeconfig",
+}
+FORBIDDEN_FILE_NAMES = {"test_quantum_patent.pdf"}
 
 
 def reason_for_member(name: str) -> str | None:
@@ -38,6 +49,8 @@ def reason_for_member(name: str) -> str | None:
         return "unsafe absolute/traversal path"
     parts = [part.casefold() for part in path.parts]
     basename = parts[-1] if parts else ""
+    if basename in FORBIDDEN_FILE_NAMES:
+        return "local-only sample artifact is not part of the source release"
     if any(part in FORBIDDEN_COMPONENTS for part in parts):
         return "forbidden VCS, customer-data, or generated directory"
     for index, part in enumerate(parts):
@@ -46,9 +59,13 @@ def reason_for_member(name: str) -> str | None:
         if part == ".env" or part.startswith(".env."):
             return "environment file/path (only a .env.example file is permitted)"
     if path.suffix.casefold() in FORBIDDEN_SUFFIXES:
-        return "compiled bytecode or local database artifact"
-    if basename in PRIVATE_KEY_NAMES or basename.endswith((".pem", ".p12", ".pfx")):
+        return "compiled bytecode, local database, private-key, or patch artifact"
+    if basename in SENSITIVE_FILE_NAMES:
+        return "credential or secret material must not be shipped in source archive"
+    if basename in PRIVATE_KEY_NAMES or basename.startswith(("id_rsa.", "id_ed25519.", "id_ecdsa.")):
         return "private-key/certificate bundle must not be shipped in source archive"
+    if basename.startswith(("service-account-", "credentials-", "secret-")) and path.suffix.casefold() in {".json", ".yml", ".yaml", ".toml"}:
+        return "credential or secret material must not be shipped in source archive"
     return None
 
 
