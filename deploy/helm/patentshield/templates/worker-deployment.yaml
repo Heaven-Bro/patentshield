@@ -52,6 +52,25 @@ spec:
             {{- if eq .Values.storage.backend "filesystem" }}
             - { name: media, mountPath: /app/media }
             {{- end }}
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  celery -A config inspect ping --destination="celery@$(hostname)"
+                  --timeout=3 2>/dev/null | grep -qi pong
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 2
           resources:
             {{- toYaml .Values.resources.worker | nindent 12 }}
           securityContext:

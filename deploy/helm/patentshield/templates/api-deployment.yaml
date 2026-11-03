@@ -59,13 +59,15 @@ spec:
             - { name: media, mountPath: /app/media }
             {{- end }}
           readinessProbe:
-            tcpSocket: { port: http }
+            httpGet: { path: /health/ready/, port: http }
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 7
           livenessProbe:
-            tcpSocket: { port: http }
+            httpGet: { path: /health/live/, port: http }
             initialDelaySeconds: 30
             periodSeconds: 20
+            timeoutSeconds: 2
           resources:
             {{- toYaml .Values.resources.api | nindent 12 }}
           securityContext:

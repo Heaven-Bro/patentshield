@@ -71,9 +71,9 @@ services:
         - CMD
         - python
         - -c
-        - "import socket; conn = socket.create_connection(('127.0.0.1', 8000), timeout=2); conn.close()"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready/', timeout=6)"
       interval: 10s
-      timeout: 3s
+      timeout: 7s
       retries: 5
       start_period: 15s
 
@@ -114,6 +114,17 @@ services:
       redis:
         condition: service_healthy
 
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          celery -A config inspect ping --destination="celery@$${HOSTNAME}"
+          --timeout=3 2>/dev/null | grep -qi pong
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   # Transformer models are resident per worker process. Keep the embedding
   # queue isolated and single-concurrency by default to avoid host OOM/VRAM spikes.
   embedding_worker:
@@ -152,6 +163,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          celery -A config inspect ping --destination="celery@$${HOSTNAME}"
+          --timeout=3 2>/dev/null | grep -qi pong
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   beat:
     build:
