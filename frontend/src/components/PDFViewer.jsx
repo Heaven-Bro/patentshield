@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 
@@ -12,6 +12,67 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
+
+function DocumentUnavailable({
+  message = "The requested patent document could not be loaded.",
+  onRetry,
+}) {
+  return (
+    <div
+      className="flex min-h-64 flex-col items-center justify-center rounded-lg border border-rose-200 bg-white p-6 text-center"
+      role="alert"
+      data-testid="pdf-unavailable"
+    >
+      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-rose-50 text-rose-700" aria-hidden="true">
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M7 3.75h7l4 4v12.5H7a2 2 0 0 1-2-2v-12.5a2 2 0 0 1 2-2Z" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M14 3.75v4h4M9 12h6M9 15.5h6" strokeLinecap="round" />
+        </svg>
+      </span>
+      <h2 className="mt-3 text-base font-semibold text-slate-900">Document Unavailable</h2>
+      <p className="mt-1 max-w-md text-sm leading-6 text-slate-600">{message}</p>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mt-4 rounded-lg bg-indigo-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-offset-2"
+        >
+          Retry document
+        </button>
+      )}
+    </div>
+  );
+}
+
+class PdfViewerErrorBoundary extends Component {
+  state = { error: null, retryCount: 0 };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error) {
+    if (import.meta.env?.DEV) {
+      console.error("PatentShield PDF viewer crashed:", error);
+    }
+  }
+
+  retry = () => {
+    this.setState((state) => ({ error: null, retryCount: state.retryCount + 1 }));
+  };
+
+  render() {
+    if (this.state.error) {
+      return (
+        <DocumentUnavailable
+          message="The document viewer encountered an unexpected rendering error. Try loading the document again."
+          onRetry={this.retry}
+        />
+      );
+    }
+    return <div key={this.state.retryCount}>{this.props.children}</div>;
+  }
+}
 
 /** @typedef {{x:number, y:number, width:number, height:number}} NormalizedBoundingBox */
 /** @typedef {{left:number, top:number, width:number, height:number}} PixelRect */
@@ -153,7 +214,7 @@ function findQuoteRects(pageElement, quote) {
  * Page numbers in the UI are one-based; evidence page_index is zero-based.
  * @param {{file?: string | File | Blob | object | null, className?: string}} props
  */
-export default function PDFViewer({ file = null, className = "" }) {
+function PDFViewerContent({ file = null, className = "" }) {
   const currentPatent = useDocumentStore((state) => state.currentPatent);
   const currentVersion = useDocumentStore((state) => state.currentVersion);
   const currentPage = useDocumentStore((state) => state.currentPage);
@@ -167,6 +228,7 @@ export default function PDFViewer({ file = null, className = "" }) {
   const clearHighlight = useDocumentStore((state) => state.clearHighlight);
 
   const [loadError, setLoadError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(720);
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
   const [quoteRects, setQuoteRects] = useState(/** @type {PixelRect[]} */ ([]));
@@ -177,6 +239,11 @@ export default function PDFViewer({ file = null, className = "" }) {
     () => resolvePdfFile(file, currentVersion, activeTenantId),
     [file, currentVersion, activeTenantId],
   );
+
+  useEffect(() => {
+    setLoadError("");
+    setTotalPages(0);
+  }, [resolvedFile, setTotalPages]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -279,8 +346,21 @@ export default function PDFViewer({ file = null, className = "" }) {
   };
 
   const handlePageError = (error) => {
-    setLoadError("The PDF could not be rendered. Check the document URL and access permissions.");
+    const responseStatus = Number(error?.status ?? error?.response?.status ?? 0);
+    const errorMessage = String(error?.message || error || "");
+    const isNotFound = responseStatus === 404 || /\b404\b/u.test(errorMessage);
+    setLoadError(
+      isNotFound
+        ? "This patent PDF could not be found in document storage. It may have been removed or moved."
+        : "The patent PDF could not be loaded. Check your connection and document access, then try again.",
+    );
     if (import.meta.env?.DEV) console.error("PatentShield PDF rendering failed:", error);
+  };
+
+  const retryDocument = () => {
+    setLoadError("");
+    setTotalPages(0);
+    setRetryCount((count) => count + 1);
   };
 
   const clearHighlightIfPageChanges = (nextPage) => {
@@ -369,14 +449,17 @@ export default function PDFViewer({ file = null, className = "" }) {
               <p className="mt-1 max-w-sm text-sm text-slate-500">Select an extracted patent document version to open its authorized PDF.</p>
             </div>
           </div>
+        ) : loadError ? (
+          <DocumentUnavailable message={loadError} onRetry={retryDocument} />
         ) : (
           <Document
+            key={retryCount}
             file={resolvedFile}
             onLoadSuccess={handleDocumentLoad}
             onLoadError={handlePageError}
             onSourceError={handlePageError}
-            loading={<p className="py-12 text-center text-sm text-slate-500">Loading PDF…</p>}
-            error={<p role="alert" className="rounded-lg bg-rose-50 p-4 text-sm text-rose-700">{loadError || "Unable to load this PDF."}</p>}
+            loading={<p className="py-12 text-center text-sm text-slate-500" role="status">Loading PDF…</p>}
+            error={<DocumentUnavailable message="The patent PDF could not be loaded." onRetry={retryDocument} />}
           >
             <div className="flex min-w-max justify-center">
               <div ref={pageContainerRef} className="relative mx-auto h-fit w-fit bg-white shadow-lg" data-testid="pdf-page-container">
@@ -415,10 +498,17 @@ export default function PDFViewer({ file = null, className = "" }) {
                 {!activeHighlight.bbox && quoteRects.length === 0 && <span className="ml-1 text-amber-800">(text location could not be matched on this rendered page)</span>}
               </div>
             )}
-            {loadError && <p role="alert" className="mt-3 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{loadError}</p>}
           </Document>
         )}
       </div>
     </section>
+  );
+}
+
+export default function PDFViewer(props) {
+  return (
+    <PdfViewerErrorBoundary>
+      <PDFViewerContent {...props} />
+    </PdfViewerErrorBoundary>
   );
 }

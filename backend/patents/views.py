@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -291,7 +292,7 @@ class PatentVersionFileView(TenantPatentAPIView):
         request: Request,
         patent_id: UUID,
         version_id: UUID,
-    ) -> HttpResponse:
+    ) -> HttpResponse | Response:
         tenant_id = self.get_tenant_id(request)
         try:
             version = (
@@ -310,10 +311,37 @@ class PatentVersionFileView(TenantPatentAPIView):
         ):
             raise NotFound("Patent PDF was not found.")
 
+        # Keep the existence check behind tenant and Matter authorization so a
+        # caller cannot use storage responses to probe another tenant's files.
+        # Local storage exposes a physical path; remote storage backends (for
+        # example S3) may not implement path(), so use their exists() contract.
+        try:
+            storage_path = default_storage.path(version.storage_key)
+        except (NotImplementedError, AttributeError):
+            storage_path = None
+
+        try:
+            file_exists = (
+                os.path.exists(storage_path)
+                if storage_path is not None
+                else default_storage.exists(version.storage_key)
+            )
+        except (OSError, ValueError):
+            file_exists = False
+
+        if not file_exists:
+            return Response(
+                {"error": "PDF file not found on storage server."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         try:
             pdf_handle = default_storage.open(version.storage_key, "rb")
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            raise NotFound("Patent PDF was not found in storage.") from exc
+        except (FileNotFoundError, OSError, ValueError):
+            return Response(
+                {"error": "PDF file not found on storage server."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         response = FileResponse(
             pdf_handle,

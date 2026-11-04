@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import AnalysisConsole from "./components/AnalysisConsole";
 import LoginPage from "./components/LoginPage";
@@ -17,18 +18,19 @@ import { useDocumentStore } from "./stores/documentStore";
 import { useMatrixStore } from "./stores/matrixStore";
 
 const NAV_ITEMS = [
-  { id: "workspace", label: "IP workspace", description: "Library & analysis", heading: "Patent intelligence workspace", summary: "Review source documents, run prior-art analysis, and manage evidence.", icon: "workspace" },
-  { id: "office-actions", label: "Prosecution", description: "Office action response", icon: "prosecution" },
-  { id: "surveillance", label: "Surveillance", description: "Competitor monitoring", icon: "surveillance" },
-  { id: "multilingual-search", label: "CJK search", description: "Cross-lingual retrieval", icon: "search" },
-  { id: "fto", label: "FTO mapping", description: "Product-to-claim review", icon: "mapping" },
-  { id: "landscape", label: "Landscape", description: "Technology intelligence", icon: "landscape" },
-  { id: "portfolio-valuation", label: "Valuation", description: "Portfolio diligence", icon: "valuation" },
-  { id: "enterprise-admin", label: "Enterprise admin", description: "Identity & governance", icon: "admin" },
+  { id: "workspace", path: "/dashboard", label: "IP workspace", description: "Library & analysis", heading: "Patent intelligence workspace", summary: "Review source documents, run prior-art analysis, and manage evidence.", icon: "workspace" },
+  { id: "patent-search", path: "/patents/search", label: "Patent search", description: "Search patent library", heading: "Patent library", summary: "Search and review patent records and source document versions.", icon: "search" },
+  { id: "office-actions", path: "/office-actions", label: "Prosecution", description: "Office action response", icon: "prosecution" },
+  { id: "surveillance", path: "/surveillance", label: "Surveillance", description: "Competitor monitoring", icon: "surveillance" },
+  { id: "multilingual-search", path: "/search/multilingual", label: "CJK search", description: "Cross-lingual retrieval", icon: "search" },
+  { id: "fto", path: "/fto/analysis", label: "FTO mapping", description: "Product-to-claim review", icon: "mapping" },
+  { id: "landscape", path: "/landscapes", label: "Landscape", description: "Technology intelligence", icon: "landscape" },
+  { id: "portfolio-valuation", path: "/portfolio/valuation", label: "Valuation", description: "Portfolio diligence", icon: "valuation" },
+  { id: "enterprise-admin", path: "/admin", label: "Enterprise admin", description: "Identity & governance", icon: "admin" },
 ];
 
 const NAV_GROUPS = [
-  { label: "Discover", ids: ["workspace", "multilingual-search"] },
+  { label: "Discover", ids: ["workspace", "patent-search", "multilingual-search"] },
   { label: "Review & monitor", ids: ["office-actions", "surveillance", "fto"] },
   { label: "Portfolio", ids: ["landscape", "portfolio-valuation"] },
   { label: "Governance", ids: ["enterprise-admin"] },
@@ -47,6 +49,77 @@ const NAV_ICON_PATHS = {
 
 function NavIcon({ name }) {
   return <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={NAV_ICON_PATHS[name] || NAV_ICON_PATHS.workspace} /></svg>;
+}
+
+const ROUTE_DEFINITIONS = [
+  { path: "/dashboard", section: "workspace", label: "IP workspace", heading: "Patent intelligence workspace", summary: "Review source documents, run prior-art analysis, and manage evidence." },
+  { path: "/patents/search", section: "patent-search", label: "Patent search", heading: "Patent library", summary: "Search and review patent records and source document versions." },
+  { path: "/patents/:id", section: "patent-search", label: "Patent search", heading: "Patent details", summary: "Review this patent record, its document versions, claims, and evidence." },
+  { path: "/office-actions", section: "office-actions", label: "Prosecution", heading: "Office action response assistant", summary: "Review examiner communications and prepare attorney-controlled responses." },
+  { path: "/surveillance", section: "surveillance", label: "Surveillance", heading: "Competitor surveillance", summary: "Monitor patent activity and review delivery status for alerts." },
+  { path: "/search/multilingual", section: "multilingual-search", label: "CJK search", heading: "Multilingual patent search", summary: "Search across patent languages and review translated source passages." },
+  { path: "/fto/analysis", section: "fto", label: "FTO mapping", heading: "Freedom-to-operate analysis", summary: "Map product features against patent claim limitations." },
+  { path: "/landscapes", section: "landscape", label: "Landscape", heading: "Patent landscape analytics", summary: "Explore technology trends, assignees, classifications, and whitespace." },
+  { path: "/portfolio/valuation", section: "portfolio-valuation", label: "Valuation", heading: "Portfolio valuation", summary: "Compare portfolio valuation scenarios and diligence assumptions." },
+  { path: "/admin", section: "enterprise-admin", label: "Enterprise admin", heading: "Enterprise administration", summary: "Manage identity integrations, matter controls, and audit exports." },
+];
+
+function resolveRoute(pathname) {
+  return ROUTE_DEFINITIONS.find((route) => matchPath({ path: route.path, end: true }, pathname)) || null;
+}
+
+function PatentWorkspacePage({
+  tenant,
+  patents,
+  patentsLoading,
+  patentsError,
+  refreshPatentLibrary,
+  onOpenDocument,
+  documentSelectionRequest,
+  initialPatentId = null,
+  onPatentSelected,
+}) {
+  return (
+    <>
+      <PatentsDashboard
+        tenant={tenant}
+        patents={patents}
+        loading={patentsLoading}
+        error={patentsError}
+        onRetry={refreshPatentLibrary}
+        onRefresh={refreshPatentLibrary}
+        onUploadSubmitted={refreshPatentLibrary}
+        onOpenDocument={onOpenDocument}
+        initialPatentId={initialPatentId}
+        onPatentSelected={onPatentSelected}
+      />
+      <AnalysisConsole
+        key={tenant.id}
+        tenant={tenant}
+        patents={patents}
+        onRefreshPatents={refreshPatentLibrary}
+        documentSelectionRequest={documentSelectionRequest}
+        initialPatentId={initialPatentId}
+      />
+    </>
+  );
+}
+
+function PatentDetailWorkspace(props) {
+  const { id } = useParams();
+  const patentExists = props.patents.some((patent) => patent.id === id);
+  if (props.patentsReady && !props.patentsError && !patentExists) {
+    return (
+      <main className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
+        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm" role="alert">
+          <h2 className="text-lg font-semibold text-slate-900">Patent not found in this workspace</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-600">This patent may have been removed or you may not have permission to view it in the selected workspace.</p>
+          <Link to="/patents/search" className="mt-4 inline-flex rounded-lg bg-indigo-700 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-800">Return to patent search</Link>
+        </section>
+      </main>
+    );
+  }
+  return <PatentWorkspacePage {...props} initialPatentId={id} />;
 }
 
 /**
@@ -74,8 +147,11 @@ export default function App() {
   const [patentsError, setPatentsError] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [refreshCounter, setRefreshCounter] = useState(0);
-  const [activeSection, setActiveSection] = useState("workspace");
   const [documentSelectionRequest, setDocumentSelectionRequest] = useState(null);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routeInfo = resolveRoute(location.pathname);
+  const activeSection = routeInfo?.section || "workspace";
 
   const activeTenant = useMemo(
     () => tenants.find((tenant) => tenant.id === activeTenantId) || null,
@@ -198,6 +274,7 @@ export default function App() {
       patentId: patent.id,
       versionId: version.id,
     });
+    navigate(`/patents/${encodeURIComponent(patent.id)}`);
     window.setTimeout(() => {
       document.getElementById("analysis-console")?.scrollIntoView({ block: "start", behavior: "smooth" });
     }, 0);
@@ -214,10 +291,10 @@ export default function App() {
     setPatentsError("");
     setPatentsLoading(false);
     setApiStatus("checking");
-    setActiveSection("workspace");
     setDocumentSelectionRequest(null);
     resetWorkspaceState();
     setActiveTenant(tenantId);
+    navigate("/dashboard", { replace: true });
   }
 
   async function handleLogin(credentials) {
@@ -252,12 +329,14 @@ export default function App() {
       setPatents([]);
       setDocumentSelectionRequest(null);
       resetWorkspaceState();
+      navigate("/login", { replace: true });
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setAnonymous();
         setPatents([]);
         setDocumentSelectionRequest(null);
         resetWorkspaceState();
+        navigate("/login", { replace: true });
       } else {
         setLogoutError(
           error instanceof Error ? error.message : "Sign out failed; please retry.",
@@ -296,7 +375,10 @@ export default function App() {
     return <LoginPage onSubmit={handleLogin} busy={loginBusy} error={loginError} />;
   }
 
-  const activeNavItem = NAV_ITEMS.find((item) => item.id === activeSection) || NAV_ITEMS[0];
+  const activeNavItem = {
+    ...(NAV_ITEMS.find((item) => item.id === activeSection) || NAV_ITEMS[0]),
+    ...(routeInfo || {}),
+  };
   const displayName = user?.full_name || user?.username || user?.email || "PatentShield user";
   const avatarLabel = displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "P";
   const apiBadge = apiStatus === "offline"
@@ -340,12 +422,10 @@ export default function App() {
                 {groupItems.map((item) => {
                   const isActive = activeSection === item.id;
                   return (
-                    <button
+                    <Link
                       key={item.id}
-                      type="button"
-                      onClick={() => setActiveSection(item.id)}
+                      to={item.path}
                       aria-current={isActive ? "page" : undefined}
-                      aria-pressed={isActive}
                       className={`group relative flex min-w-max items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 lg:w-full lg:gap-3 lg:px-3 lg:py-2.5 lg:text-sm ${isActive ? "bg-indigo-400/15 text-white ring-1 ring-inset ring-indigo-300/20" : "text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"}`}
                     >
                       <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${isActive ? "bg-indigo-500 text-white" : "bg-white/[0.045] text-slate-400 group-hover:text-slate-200"}`} aria-hidden="true">
@@ -356,7 +436,7 @@ export default function App() {
                         <span className={`mt-0.5 hidden text-[10px] font-normal lg:block ${isActive ? "text-indigo-200" : "text-slate-500"}`}>{item.description}</span>
                       </span>
                       {isActive && <span className="hidden h-1.5 w-1.5 rounded-full bg-indigo-300 lg:block" />}
-                    </button>
+                    </Link>
                   );
                 })}
               </div>
@@ -424,25 +504,75 @@ export default function App() {
                 <div className="mt-5 max-w-lg"><TenantSwitcher tenants={tenants} value={activeTenantId} onChange={handleTenantChange} /></div>
               </div>
             </main>
-          ) : activeSection === "surveillance" ? (
-            <SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />
-          ) : activeSection === "office-actions" ? (
-            <OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />
-          ) : activeSection === "multilingual-search" ? (
-            <MultilingualSearch key={activeTenant.id} tenant={activeTenant} />
-          ) : activeSection === "fto" ? (
-            <FTOWorkspace key={activeTenant.id} tenant={activeTenant} patents={patents} />
-          ) : activeSection === "landscape" ? (
-            <LandscapeAnalytics key={activeTenant.id} tenant={activeTenant} />
-          ) : activeSection === "portfolio-valuation" ? (
-            <PortfolioValuation key={activeTenant.id} tenant={activeTenant} />
-          ) : activeSection === "enterprise-admin" && ["OWNER", "ADMIN"].includes(activeTenant.role) ? (
-            <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
           ) : (
-            <>
-              <PatentsDashboard tenant={activeTenant} patents={patents} loading={patentsLoading} error={patentsError} onRetry={refreshPatentLibrary} onRefresh={refreshPatentLibrary} onUploadSubmitted={refreshPatentLibrary} onOpenDocument={openDocumentInReview} />
-              <AnalysisConsole key={activeTenant.id} tenant={activeTenant} patents={patents} onRefreshPatents={refreshPatentLibrary} documentSelectionRequest={documentSelectionRequest} />
-            </>
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+              <Route
+                path="/dashboard"
+                element={(
+                  <PatentWorkspacePage
+                    tenant={activeTenant}
+                    patents={patents}
+                    patentsLoading={patentsLoading}
+                    patentsError={patentsError}
+                    patentsReady={apiStatus === "online"}
+                    refreshPatentLibrary={refreshPatentLibrary}
+                    onOpenDocument={openDocumentInReview}
+                    documentSelectionRequest={documentSelectionRequest}
+                    onPatentSelected={(patent) => navigate(`/patents/${encodeURIComponent(patent.id)}`)}
+                  />
+                )}
+              />
+              <Route
+                path="/patents/search"
+                element={(
+                  <PatentsDashboard
+                    tenant={activeTenant}
+                    patents={patents}
+                    loading={patentsLoading}
+                    error={patentsError}
+                    onRetry={refreshPatentLibrary}
+                    onRefresh={refreshPatentLibrary}
+                    onUploadSubmitted={refreshPatentLibrary}
+                    onOpenDocument={openDocumentInReview}
+                    onPatentSelected={(patent) => navigate(`/patents/${encodeURIComponent(patent.id)}`)}
+                  />
+                )}
+              />
+              <Route
+                path="/patents/:id"
+                element={(
+                  <PatentDetailWorkspace
+                    tenant={activeTenant}
+                    patents={patents}
+                    patentsLoading={patentsLoading}
+                    patentsError={patentsError}
+                    patentsReady={apiStatus === "online"}
+                    refreshPatentLibrary={refreshPatentLibrary}
+                    onOpenDocument={openDocumentInReview}
+                    documentSelectionRequest={documentSelectionRequest}
+                    onPatentSelected={(patent) => navigate(`/patents/${encodeURIComponent(patent.id)}`)}
+                  />
+                )}
+              />
+              <Route path="/office-actions" element={<OfficeActionAssistant key={activeTenant.id} tenant={activeTenant} patents={patents} />} />
+              <Route path="/surveillance" element={<SurveillanceDashboard key={activeTenant.id} tenant={activeTenant} />} />
+              <Route path="/search/multilingual" element={<MultilingualSearch key={activeTenant.id} tenant={activeTenant} />} />
+              <Route path="/fto/analysis" element={<FTOWorkspace key={activeTenant.id} tenant={activeTenant} patents={patents} />} />
+              <Route path="/landscapes" element={<LandscapeAnalytics key={activeTenant.id} tenant={activeTenant} />} />
+              <Route path="/portfolio/valuation" element={<PortfolioValuation key={activeTenant.id} tenant={activeTenant} />} />
+              <Route
+                path="/admin"
+                element={[
+                  "OWNER",
+                  "ADMIN",
+                ].includes(activeTenant.role)
+                  ? <EnterpriseAdminConsole key={activeTenant.id} tenant={activeTenant} user={user} />
+                  : <Navigate to="/dashboard" replace />}
+              />
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            </Routes>
           )}
         </div>
       </div>

@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Frontend-local environment values (VITE_ values are public after bundling)
+.env
+.env.local
+.env.*.local
+!.env.example

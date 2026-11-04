@@ -58,6 +58,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=django:django backend/ /app/
+COPY --chown=django:django deploy/helm/patentshield/ /app/deploy/helm/patentshield/
+COPY --chown=django:django docker-compose.yml /app/docker-compose.yml
 
 # Collect Django admin and application static assets into STATIC_ROOT at image
 # build time. WhiteNoise serves these files in the offline runtime; no database

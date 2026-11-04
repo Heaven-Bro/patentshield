@@ -74,6 +74,32 @@ class FTOServiceTests(TestCase):
         feature = SimpleNamespace(pk="feature-a", title="A device", description="The system is configured", source_quote="A system comprising components.")
         self.assertEqual(rank_product_features_for_limitation("A device comprising the system", [feature]), [])
 
+    def test_candidate_ranking_ignores_generic_claim_nouns_but_keeps_technical_matches(self):
+        from types import SimpleNamespace
+
+        feature = SimpleNamespace(
+            pk="feature-sensor",
+            title="A sensor system",
+            description="The device measures optical signals.",
+            source_quote="An apparatus comprising an optical sensor.",
+        )
+        ranked = rank_product_features_for_limitation(
+            "A device comprising an optical sensor system",
+            [feature],
+        )
+        repeated = rank_product_features_for_limitation(
+            "A device comprising an optical sensor system",
+            [feature],
+        )
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(repeated, ranked)
+        self.assertEqual(ranked[0]["feature"].pk, "feature-sensor")
+        self.assertIn("sensor", ranked[0]["matched_terms"])
+        self.assertIn("optical", ranked[0]["matched_terms"])
+        self.assertNotIn("device", ranked[0]["matched_terms"])
+        self.assertNotIn("system", ranked[0]["matched_terms"])
+
     def test_candidate_ranking_rejects_unbounded_result_count(self):
         with self.assertRaises(ValueError):
             rank_product_features_for_limitation("sensor", [], max_results=5000)
@@ -314,10 +340,28 @@ class FTOApiTests(TestCase):
         )
         response = self.client.get(f"/api/v1/fto/studies/{study.pk}/risk-heatmap/", **self.headers)
         self.assertEqual(response.status_code, 200, response.data)
-        row = response.data["claims"][0]["limitations"][0]
+        heatmap_rows = [
+            limitation_row
+            for claim_row in response.data["claims"]
+            for limitation_row in claim_row["limitations"]
+        ]
+        row = next(
+            (
+                limitation_row
+                for limitation_row in heatmap_rows
+                if limitation_row["limitation_id"] == str(limitation.pk)
+            ),
+            None,
+        )
+        self.assertIsNotNone(
+            row,
+            f"Heatmap omitted the persisted study limitation {limitation.pk}",
+        )
         self.assertEqual(row["candidate_matches"][0]["feature_id"], str(feature.pk))
         self.assertEqual(row["candidate_matches"][0]["feature_title"], feature.title)
         self.assertEqual(row["candidate_matches"][0]["source_quote"], feature.source_quote)
         self.assertEqual(row["triage_status"], LimitationAssessment.TriageStatus.UNASSESSED)
         self.assertIn("lexical overlap only", response.data["candidate_match_disclaimer"].casefold())
         self.assertIn("500", response.data["candidate_match_disclaimer"])
+        feature.refresh_from_db()
+        self.assertEqual(feature.review_status, ProductFeature.ReviewStatus.CANDIDATE)

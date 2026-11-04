@@ -50,3 +50,17 @@ models/
 
 # Sanitized release candidates created by scripts/release_gate.sh
 /build/
+
+# Local developer secrets (including nested application environments)
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+!.env.example
+!**/.env.example
+
+# Playwright output
+frontend/playwright-report/
+frontend/test-results/

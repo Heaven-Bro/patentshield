@@ -1,6 +1,8 @@
-import PDFViewer from "./PDFViewer";
+import { lazy, Suspense } from "react";
 import ClaimMatrix from "./ClaimMatrix";
 import { useMatrixStore } from "../stores/matrixStore";
+
+const PDFViewer = lazy(() => import("./PDFViewer"));
 
 const METRIC_LABELS = [
   ["retrieval_relevance", "Retrieval relevance"],
@@ -36,7 +38,15 @@ export default function WorkspaceLayout({ pdfFile = null, className = "", patent
       aria-label="PatentShield analysis workspace"
     >
       <section className="col-span-12 flex min-h-0 flex-col lg:col-span-7" aria-label="Source document">
-        <PDFViewer file={pdfFile} className="flex-1" />
+        <Suspense
+          fallback={(
+            <div className="flex min-h-64 flex-1 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm text-slate-500" role="status" aria-live="polite">
+              Loading document viewer…
+            </div>
+          )}
+        >
+          <PDFViewer file={pdfFile} className="flex-1" />
+        </Suspense>
       </section>
 
       <section className="col-span-12 flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-panel lg:col-span-5">

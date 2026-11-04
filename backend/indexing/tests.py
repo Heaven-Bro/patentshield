@@ -1,5 +1,6 @@
 """Tests for Unicode language detection and original-language lexical tokenization."""
 
+import tempfile
 from types import ModuleType
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from django.test import SimpleTestCase, override_settings
 
 from indexing.language import detect_language, detect_language_code, tokenize_original_language
 from indexing.services import BGEEmbedder, BM25LexicalIndex, HybridChunker
+from test_support.offline_model_fixture import create_offline_model_installation
 
 
 class CJKLanguageDetectionTests(SimpleTestCase):
@@ -109,30 +111,34 @@ class FlagEmbeddingAdapterTests(SimpleTestCase):
 
         fake_module = ModuleType("FlagEmbedding")
         fake_module.BGEM3FlagModel = FakeBGEModel
-        with (
-            override_settings(
-                BGE_MODEL_NAME="BAAI/bge-m3",
-                BGE_MODEL_PATH="/models/bge-m3",
-                BGE_MODEL_REVISION="release-2026-10",
-                BGE_BATCH_SIZE=8,
-                PATENTSHIELD_BGE_MAX_LENGTH=8192,
-                PATENTSHIELD_BGE_USE_FP16=False,
-                PATENTSHIELD_BGE_DEVICE="cpu",
-                PATENTSHIELD_MODEL_CACHE_DIR="",
-            ),
-            patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
-            patch("indexing.services.os.path.isdir", return_value=True),
-        ):
-            vectors = BGEEmbedder.embed_texts(["无线通信专利"])
-            model_identity = BGEEmbedder.model_identity()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = create_offline_model_installation(temp_dir)
+            revision = fixture["revisions"]["bge-m3"]
+            with (
+                override_settings(
+                    BGE_MODEL_NAME="BAAI/bge-m3",
+                    BGE_MODEL_PATH=fixture["bge_m3_path"],
+                    BGE_MODEL_REVISION=revision,
+                    BGE_BATCH_SIZE=8,
+                    PATENTSHIELD_BGE_MAX_LENGTH=8192,
+                    PATENTSHIELD_BGE_USE_FP16=False,
+                    PATENTSHIELD_BGE_DEVICE="cpu",
+                    PATENTSHIELD_MODEL_CACHE_DIR="",
+                    PATENTSHIELD_OFFLINE_MODE=True,
+                    PATENTSHIELD_MODEL_BUNDLE_MANIFEST=fixture["manifest_path"],
+                ),
+                patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
+            ):
+                vectors = BGEEmbedder.embed_texts(["无线通信专利"])
+                model_identity = BGEEmbedder.model_identity()
 
-        self.assertEqual(calls["model_source"], "/models/bge-m3")
+        self.assertEqual(calls["model_source"], fixture["bge_m3_path"])
         self.assertEqual(calls["kwargs"]["devices"], ["cpu"])
         self.assertEqual(calls["kwargs"]["trust_remote_code"], False)
         self.assertEqual(calls["encode_kwargs"]["return_sparse"], False)
         self.assertEqual(len(vectors), 1)
         self.assertEqual(len(vectors[0]), 1024)
-        self.assertEqual(model_identity, ("BAAI/bge-m3", "release-2026-10"))
+        self.assertEqual(model_identity, ("BAAI/bge-m3", revision))
 
     def test_rejects_wrong_dense_dimension(self):
         class FakeBGEModel:

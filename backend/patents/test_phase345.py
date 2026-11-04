@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from types import ModuleType
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from patents.ai_serializers import (
 )
 from patents.ai_services import analyze_infringement_risk, parse_json_object
 from patents.embedding_services import MiniLMEmbedder
+from test_support.offline_model_fixture import create_offline_model_installation
 
 
 class MiniLMEmbedderTests(SimpleTestCase):
@@ -50,6 +52,7 @@ class MiniLMEmbedderTests(SimpleTestCase):
 
             def __init__(self, *args, **kwargs):
                 type(self).instances += 1
+                self.initialization = kwargs
 
             def embed(self, texts, **kwargs):
                 for _ in texts:
@@ -57,11 +60,34 @@ class MiniLMEmbedderTests(SimpleTestCase):
 
         fake_module = ModuleType("fastembed")
         fake_module.TextEmbedding = FakeTextEmbedding
-        with patch.dict(sys.modules, {"fastembed": fake_module}):
-            first = MiniLMEmbedder.embed_texts(["first patent"])
-            second = MiniLMEmbedder.embed_texts(["second patent"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = create_offline_model_installation(temp_dir)
+            revision = fixture["revisions"]["public-patent-embedding"]
+            with (
+                override_settings(
+                    PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_REVISION=revision,
+                    PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_CACHE_DIR=fixture["public_cache_dir"],
+                    PATENTSHIELD_PUBLIC_PATENT_EMBEDDING_LOCAL_FILES_ONLY=True,
+                    PATENTSHIELD_MODEL_BUNDLE_MANIFEST=fixture["manifest_path"],
+                    PATENTSHIELD_OFFLINE_MODE=True,
+                ),
+                patch.dict(sys.modules, {"fastembed": fake_module}),
+            ):
+                first = MiniLMEmbedder.embed_texts(["first patent"])
+                second = MiniLMEmbedder.embed_texts(["second patent"])
+                model_identity = MiniLMEmbedder.model_identity()
 
         self.assertEqual(FakeTextEmbedding.instances, 1)
+        self.assertEqual(model_identity, ("BAAI/bge-large-en-v1.5", revision))
+        self.assertEqual(
+            MiniLMEmbedder._model.initialization["model_name"],
+            "BAAI/bge-large-en-v1.5",
+        )
+        self.assertEqual(
+            MiniLMEmbedder._model.initialization["cache_dir"],
+            fixture["public_cache_dir"],
+        )
+        self.assertTrue(MiniLMEmbedder._model.initialization["local_files_only"])
         self.assertEqual(len(first[0]), 1024)
         self.assertEqual(len(second[0]), 1024)
 

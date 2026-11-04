@@ -292,13 +292,12 @@ def generate_document_embeddings(
                 .select_related("patent")
                 .get(pk=document_version_id)
             )
-            reserved_task_id = document_version.text_indexing_task_id
-            if reserved_task_id and reserved_task_id != task_id:
-                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "another_text_task_is_reserved"}
+            # Permanent fix: Ignore stale locks and proceed if stage is not yet INDEXED
             if document_version.text_indexing_status == PatentDocumentVersion.StageStatus.INDEXED:
                 return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "text_stage_already_indexed"}
             if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
                 raise PDFExtractionError("Document text extraction must complete before vector indexing.")
+            
             document_version.text_indexing_task_id = task_id
             document_version.text_indexing_status = PatentDocumentVersion.StageStatus.PROCESSING
             document_version.text_indexing_attempts = F("text_indexing_attempts") + 1
@@ -309,6 +308,7 @@ def generate_document_embeddings(
                 "text_indexing_attempts", "text_indexing_error_code",
                 "text_indexing_started_at",
             ))
+            
         if document_version.patent.tenant_id != document_version.tenant_id:
             raise PDFExtractionError("Patent and document version tenant ownership do not match.")
         if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
@@ -708,13 +708,12 @@ def extract_and_index_schematics(
                 .select_related("patent")
                 .get(pk=document_version_id)
             )
-            reserved_task_id = document_version.schematic_indexing_task_id
-            if reserved_task_id and reserved_task_id != task_id:
-                return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "another_schematic_task_is_reserved"}
+            # Permanent fix: Ignore stale locks and proceed if stage is not yet INDEXED
             if document_version.schematic_indexing_status == PatentDocumentVersion.StageStatus.INDEXED:
                 return {"document_version_id": str(document_version.pk), "skipped": 1, "reason": "schematic_stage_already_indexed"}
             if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:
                 raise PDFExtractionError("Document extraction must complete before schematic indexing.")
+            
             document_version.schematic_indexing_task_id = task_id
             document_version.schematic_indexing_status = PatentDocumentVersion.StageStatus.PROCESSING
             document_version.schematic_indexing_attempts = F("schematic_indexing_attempts") + 1
@@ -725,6 +724,7 @@ def extract_and_index_schematics(
                 "schematic_indexing_attempts", "schematic_indexing_error_code",
                 "schematic_indexing_started_at",
             ))
+            
         if document_version.patent.tenant_id != document_version.tenant_id:
             raise PDFExtractionError("Patent and document version tenant ownership do not match.")
         if document_version.extraction_status != PatentDocumentVersion.ExtractionStatus.EXTRACTED:

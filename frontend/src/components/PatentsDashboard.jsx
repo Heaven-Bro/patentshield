@@ -75,6 +75,8 @@ export default function PatentsDashboard({
   onRefresh,
   onUploadSubmitted,
   onOpenDocument,
+  initialPatentId = null,
+  onPatentSelected,
 }) {
   const [retryingVersionId, setRetryingVersionId] = useState(null);
   const [processingActionError, setProcessingActionError] = useState("");
@@ -105,6 +107,14 @@ export default function PatentsDashboard({
       return matchesStatus && matchesQuery;
     });
   }, [patents, query, statusFilter]);
+
+  useEffect(() => {
+    if (!initialPatentId) return;
+    const initialPatent = patents.find((patent) => patent.id === initialPatentId);
+    if (!initialPatent) return;
+    setSelectedPatentId(initialPatent.id);
+    setSelectedVersionId(initialPatent.versions?.[0]?.id || "");
+  }, [initialPatentId, patents]);
 
   useEffect(() => {
     if (!selectedPatentId || patents.some((patent) => patent.id === selectedPatentId)) return;
@@ -411,7 +421,10 @@ function formatConfidence(value) {
                     <div className="mt-4 flex justify-end border-t border-slate-100 pt-3">
                       <button
                         type="button"
-                        onClick={() => inspectPatent(patent)}
+                        onClick={() => {
+                          if (onPatentSelected) onPatentSelected(patent);
+                          else inspectPatent(patent);
+                        }}
                         aria-expanded={selectedPatentId === patent.id}
                         className="ps-button-secondary min-h-9"
                       >

@@ -12,6 +12,21 @@ from config.celery import app as celery_app
 from analyses.routing import websocket_urlpatterns
 
 
+def _repository_root() -> Path:
+    """Find the repository root by its release assets, not a fixed depth."""
+    test_path = Path(__file__).resolve()
+    for candidate in test_path.parents:
+        if (
+            (candidate / "deploy/helm/patentshield/templates/api-deployment.yaml").is_file()
+            and (candidate / "deploy/helm/patentshield/templates/worker-deployment.yaml").is_file()
+            and (candidate / "docker-compose.yml").is_file()
+        ):
+            return candidate
+    raise AssertionError(
+        "Could not locate repository root containing Helm and Compose release assets."
+    )
+
+
 class ReleaseConfigurationTests(SimpleTestCase):
     """Fail early if critical API routes or Celery queues become unwired."""
 
@@ -67,7 +82,7 @@ class ReleaseConfigurationTests(SimpleTestCase):
         )
 
     def test_health_and_worker_probes_are_configured(self) -> None:
-        repository_root = Path(__file__).resolve().parents[2]
+        repository_root = _repository_root()
         api_template = (
             repository_root
             / "deploy/helm/patentshield/templates/api-deployment.yaml"

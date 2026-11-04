@@ -188,6 +188,9 @@ _MATCH_STOP_WORDS = frozenset({
     "comprising", "comprise", "comprises", "wherein", "whereby", "thereof", "therein",
     "said", "such", "each", "one", "more", "at", "least", "plurality", "configured",
     "adapted", "according", "claim", "claims", "feature", "features",
+    # Generic claim categories are not evidence of a product-feature match.
+    # Keep specific technical nouns (e.g. sensor, processor, circuit) searchable.
+    "device", "system", "apparatus", "method",
 })
 _MATCH_TOKEN = re.compile(r"[^\W_]{2,}", re.UNICODE)
 
@@ -244,14 +247,14 @@ def rank_product_features_for_limitation(
         # informative without allowing a token to have an unbounded weight.
         return 1.0 + log((total_docs + 1.0) / (document_frequency.get(token, 0) + 1.0))
 
-    query_weight = sum(weight(token) for token in limitation_terms)
+    query_weight = sum(weight(token) for token in sorted(limitation_terms))
     ranked: list[dict] = []
     for feature, feature_terms in feature_rows:
         overlap = limitation_terms & feature_terms
         if not overlap:
             continue
-        overlap_weight = sum(weight(token) for token in overlap)
-        feature_weight = sum(weight(token) for token in feature_terms)
+        overlap_weight = sum(weight(token) for token in sorted(overlap))
+        feature_weight = sum(weight(token) for token in sorted(feature_terms))
         precision = overlap_weight / feature_weight if feature_weight else 0.0
         coverage = overlap_weight / query_weight if query_weight else 0.0
         score = (2.0 * precision * coverage / (precision + coverage)) if (precision + coverage) else 0.0

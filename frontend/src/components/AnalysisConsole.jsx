@@ -46,9 +46,9 @@ function statusClass(value) {
 /**
  * Authenticated claim analysis console with recoverable WebSocket progress,
  * authoritative REST polling, and tenant-scoped report downloads.
- * @param {{tenant:object, patents:Array<Record<string, any>>, onRefreshPatents?:()=>void, documentSelectionRequest?:{tenantId:string,patentId:string,versionId:string}|null}} props
+ * @param {{tenant:object, patents:Array<Record<string, any>>, onRefreshPatents?:()=>void, documentSelectionRequest?:{tenantId:string,patentId:string,versionId:string}|null, initialPatentId?:string|null}} props
  */
-export default function AnalysisConsole({ tenant, patents, onRefreshPatents, documentSelectionRequest = null }) {
+export default function AnalysisConsole({ tenant, patents, onRefreshPatents, documentSelectionRequest = null, initialPatentId = null }) {
   const tenantId = tenant?.id || null;
   const canRunAnalysis = RUN_ROLES.has(tenant?.role);
 
@@ -125,8 +125,25 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents, doc
     // results from overwriting a newer user selection.
     const timer = window.setTimeout(() => {
       if (patents.length === 0) {
-        setSelectedPatentId("");
-        setSelectedVersionId("");
+        if (!initialPatentId) {
+          setSelectedPatentId("");
+          setSelectedVersionId("");
+        }
+        return;
+      }
+      if (initialPatentId) {
+        const routePatent = patents.find((patent) => patent.id === initialPatentId);
+        if (!routePatent) return;
+        const routeVersions = (routePatent.versions || []).filter(
+          (version) => version.extraction_status === "EXTRACTED",
+        );
+        const routeVersion = routeVersions.find((version) => version.id === selectedVersionId)
+          || routeVersions[0]
+          || null;
+        if (selectedPatentId !== routePatent.id) setSelectedPatentId(routePatent.id);
+        if (selectedVersionId !== (routeVersion?.id || "")) {
+          setSelectedVersionId(routeVersion?.id || "");
+        }
         return;
       }
       const selectedPatent = patents.find((patent) => patent.id === selectedPatentId);
@@ -150,7 +167,7 @@ export default function AnalysisConsole({ tenant, patents, onRefreshPatents, doc
       setSelectedVersionId(preferredVersion?.id || "");
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [tenantId, patents, selectedPatentId, selectedVersionId]);
+  }, [tenantId, patents, selectedPatentId, selectedVersionId, initialPatentId]);
 
   useEffect(() => {
     if (

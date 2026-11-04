@@ -1,11 +1,13 @@
 """Tests for retrieval, including bounded external provider transport."""
 
+import tempfile
 from types import ModuleType
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
 
 from retrieval.schemas import RetrievedCandidate
+from test_support.offline_model_fixture import create_offline_model_installation
 
 from retrieval.external import (
     MAX_PROVIDER_RESPONSE_BYTES,
@@ -250,22 +252,27 @@ class FlagRerankerModelLoadingTests(SimpleTestCase):
 
         fake_module = ModuleType("FlagEmbedding")
         fake_module.FlagReranker = FakeFlagReranker
-        with (
-            override_settings(
-                PATENTSHIELD_RERANKER_MODEL_NAME="BAAI/bge-reranker-v2-m3",
-                PATENTSHIELD_RERANKER_MODEL_PATH="/models/reranker",
-                PATENTSHIELD_RERANKER_USE_FP16=False,
-                PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH=256,
-                PATENTSHIELD_RERANKER_MAX_LENGTH=512,
-                PATENTSHIELD_RERANKER_DEVICE="cpu",
-                PATENTSHIELD_MODEL_CACHE_DIR="",
-            ),
-            patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
-            patch("retrieval.services.os.path.isdir", return_value=True),
-        ):
-            model = CrossEncoderReranker._get_model()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = create_offline_model_installation(temp_dir)
+            revision = fixture["revisions"]["reranker"]
+            with (
+                override_settings(
+                    PATENTSHIELD_RERANKER_MODEL_NAME="BAAI/bge-reranker-v2-m3",
+                    PATENTSHIELD_RERANKER_MODEL_PATH=fixture["reranker_path"],
+                    PATENTSHIELD_RERANKER_MODEL_REVISION=revision,
+                    PATENTSHIELD_RERANKER_USE_FP16=False,
+                    PATENTSHIELD_RERANKER_QUERY_MAX_LENGTH=256,
+                    PATENTSHIELD_RERANKER_MAX_LENGTH=512,
+                    PATENTSHIELD_RERANKER_DEVICE="cpu",
+                    PATENTSHIELD_MODEL_CACHE_DIR="",
+                    PATENTSHIELD_MODEL_BUNDLE_MANIFEST=fixture["manifest_path"],
+                    PATENTSHIELD_OFFLINE_MODE=True,
+                ),
+                patch.dict("sys.modules", {"FlagEmbedding": fake_module}),
+            ):
+                model = CrossEncoderReranker._get_model()
 
         self.assertIsInstance(model, FakeFlagReranker)
-        self.assertEqual(calls["model_source"], "/models/reranker")
+        self.assertEqual(calls["model_source"], fixture["reranker_path"])
         self.assertEqual(calls["kwargs"]["devices"], ["cpu"])
         self.assertEqual(calls["kwargs"]["query_max_length"], 256)

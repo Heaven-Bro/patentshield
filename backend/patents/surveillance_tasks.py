@@ -177,7 +177,8 @@ def poll_watchlist(self, watchlist_id: str) -> dict[str, Any]:
     task_id = str(getattr(self.request, "id", "") or "")
     with transaction.atomic():
         watchlist = (
-            SurveillanceWatchlist.objects.select_for_update()
+            SurveillanceWatchlist.objects
+            .select_for_update(of=("self",))
             .select_related("tenant", "created_by")
             .filter(pk=watchlist_id)
             .first()

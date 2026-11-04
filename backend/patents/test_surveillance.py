@@ -487,25 +487,31 @@ class SurveillanceTestCase(TestCase):
             "patents.surveillance_tasks.poll_watchlist.apply_async",
             side_effect=fake_apply_async,
         ) as dispatch:
-            first = self.client.post(
-                f"/api/v1/patents/surveillance/watchlists/{self.watchlist.pk}/poll/",
-                {},
-                format="json",
-                **self.headers,
-            )
-            second = self.client.post(
-                f"/api/v1/patents/surveillance/watchlists/{self.watchlist.pk}/poll/",
-                {},
-                format="json",
-                **self.headers,
-            )
+            with self.captureOnCommitCallbacks(execute=True) as callbacks:
+                first = self.client.post(
+                    f"/api/v1/patents/surveillance/watchlists/{self.watchlist.pk}/poll/",
+                    {},
+                    format="json",
+                    **self.headers,
+                )
+                second = self.client.post(
+                    f"/api/v1/patents/surveillance/watchlists/{self.watchlist.pk}/poll/",
+                    {},
+                    format="json",
+                    **self.headers,
+                )
 
         self.assertEqual(first.status_code, 202, first.data)
         self.assertEqual(second.status_code, 202, second.data)
         self.assertTrue(first.data["task_id"])
+        self.assertFalse(first.data["already_active"])
         self.assertTrue(second.data["already_active"])
         self.assertEqual(second.data["task_id"], first.data["task_id"])
         dispatch.assert_called_once()
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(dispatch.call_args.kwargs["task_id"], first.data["task_id"])
+        self.assertEqual(dispatch.call_args.kwargs["args"], (str(self.watchlist.pk),))
+        self.assertEqual(dispatch.call_args.kwargs["queue"], "external_search")
         self.watchlist.refresh_from_db()
         self.assertEqual(self.watchlist.poll_status, SurveillanceWatchlist.PollStatus.QUEUED)
         self.assertEqual(self.watchlist.active_task_id, first.data["task_id"])
@@ -778,4 +784,3 @@ class SurveillanceTestCase(TestCase):
         self.assertEqual(result["status"], "DUPLICATE_SKIPPED")
         send.assert_not_called()
         self.assertEqual(AlertDeliveryAttempt.objects.filter(delivery=delivery).count(), 0)
-
