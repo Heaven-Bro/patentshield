@@ -128,7 +128,7 @@ services:
       - -l
       - INFO
       - -Q
-      - default,ingestion,office_actions,surveillance,fto,landscapes,analyses,reports
+      - default,ingestion,analysis,exports,external_search,office_actions,surveillance,fto,landscapes,analyses,reports
 
     environment: *django-environment
 
